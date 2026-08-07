@@ -166,9 +166,20 @@ end
 -- --- Public API ----------------------------------------------------------
 
 --- on_exit callback: auto-cleanup when a claude process ends.
---- toggleterm (close_on_exit = true default) closes the window and wipes the
---- buffer itself, so no UI work is needed here.
+--- Sessions run with close_on_exit = false (see create) so that a killed job's
+--- exit does not make toggleterm close the window / restore focus to the origin
+--- window; that focus restore is what makes <C-d> steal focus ~0.5s later. We
+--- tidy the window and buffer here instead.
 function M._on_session_exit(record)
+  local term = record.term
+  if term then
+    if window_open(term) then
+      term:close()
+    end
+    if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+      vim.api.nvim_buf_delete(term.bufnr, { force = true })
+    end
+  end
   remove_record(record)
   notify('Session ended: ' .. record.name)
 end
@@ -186,6 +197,9 @@ function M.create()
     -- clears the marker inherited from this nvim's environment so the spawned
     -- process is treated as an independent, trackable agent.
     env = { CLAUDE_CODE_CHILD_SESSION = '' },
+    -- Keep toggleterm from closing the window / restoring focus when the job
+    -- dies; _on_session_exit cleans up instead.
+    close_on_exit = false,
     on_exit = function() M._on_session_exit(record) end,
   })
   table.insert(sessions, record)
@@ -230,43 +244,34 @@ function M.close_current()
       break
     end
   end
-  if window_open(term) then
-    term:close() -- window-only; the process is still alive
-  end
+  -- Remember the window showing the target, so the split can be kept in place.
+  local win = window_open(term) and term.window or nil
   if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
-    -- Wiping the terminal buffer kills the claude job; toggleterm's TermClose
-    -- autocmd cleans its registry.
+    -- Wiping the terminal buffer kills the claude job; the record is dropped
+    -- below. close_on_exit = false keeps the job's later exit from closing the
+    -- window / moving focus.
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
   remove_record(target)
   notify('Closed session: ' .. target.name)
-  -- Keep the split occupied: show the session that took the closed one's place.
   if #sessions > 0 then
     local next_session = sessions[index] or sessions[#sessions]
-    show_session(next_session)
-    -- Killing the claude job above (buf_delete) makes nvim's terminal handling
-    -- return focus to the origin window once the job actually dies (~0.5s
-    -- later), undoing show_session's focus. Refocus the shown session on a
-    -- short retry loop until focus sticks.
-    local tries = 0
-    local function keep_focus()
-      tries = tries + 1
-      local win = next_session.term.window
-      if vim.api.nvim_win_is_valid(win) then
-        local curwin = vim.api.nvim_get_current_win()
-        local mode = vim.api.nvim_get_mode().mode
-        -- Refocus if focus drifted, and enter insert mode if the terminal is
-        -- in terminal-normal (nt) mode.
-        if curwin ~= win or mode:find('nt') then
-          vim.api.nvim_set_current_win(win)
-          vim.cmd('startinsert')
-        end
-      end
-      if tries < 12 then -- ~1.8s: long enough to outlast the job-exit refocus
-        vim.defer_fn(keep_focus, 150)
-      end
+    if win and vim.api.nvim_win_is_valid(win) then
+      -- Keep the same split: swap the next session's buffer into this window
+      -- in place (no window close/reopen, so the statusline and bufferline get
+      -- a single clean update instead of flickering).
+      close_all_open_windows(next_session.term)
+      vim.api.nvim_set_current_win(win)
+      vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
+      next_session.term.window = win
+      current = next_session
+      -- The window inherited the closed session's highlights; apply the new
+      -- session's.
+      require('toggleterm.ui').hl_term(next_session.term)
+      vim.cmd('startinsert')
+    else
+      show_session(next_session)
     end
-    vim.schedule(keep_focus)
   end
 end
 
