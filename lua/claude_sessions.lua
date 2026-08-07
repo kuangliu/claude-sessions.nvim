@@ -212,6 +212,8 @@ function M.create()
 end
 
 --- Close the current session (window + process) and drop it.
+--- The split stays occupied: the session that followed the closed one (or the
+--- last remaining one, if the closed one was last) is shown in its place.
 --- If no window is displayed, closes the most recently created session.
 function M.close_current()
   if #sessions == 0 then
@@ -220,6 +222,14 @@ function M.close_current()
   end
   local target = current or sessions[#sessions]
   local term = target.term
+  -- Position of the closed session, so its successor can be shown.
+  local index
+  for i, s in ipairs(sessions) do
+    if s == target then
+      index = i
+      break
+    end
+  end
   if window_open(term) then
     term:close() -- window-only; the process is still alive
   end
@@ -230,6 +240,34 @@ function M.close_current()
   end
   remove_record(target)
   notify('Closed session: ' .. target.name)
+  -- Keep the split occupied: show the session that took the closed one's place.
+  if #sessions > 0 then
+    local next_session = sessions[index] or sessions[#sessions]
+    show_session(next_session)
+    -- Killing the claude job above (buf_delete) makes nvim's terminal handling
+    -- return focus to the origin window once the job actually dies (~0.5s
+    -- later), undoing show_session's focus. Refocus the shown session on a
+    -- short retry loop until focus sticks.
+    local tries = 0
+    local function keep_focus()
+      tries = tries + 1
+      local win = next_session.term.window
+      if vim.api.nvim_win_is_valid(win) then
+        local curwin = vim.api.nvim_get_current_win()
+        local mode = vim.api.nvim_get_mode().mode
+        -- Refocus if focus drifted, and enter insert mode if the terminal is
+        -- in terminal-normal (nt) mode.
+        if curwin ~= win or mode:find('nt') then
+          vim.api.nvim_set_current_win(win)
+          vim.cmd('startinsert')
+        end
+      end
+      if tries < 12 then -- ~1.8s: long enough to outlast the job-exit refocus
+        vim.defer_fn(keep_focus, 150)
+      end
+    end
+    vim.schedule(keep_focus)
+  end
 end
 
 --- <C-s>: cycle sessions. With a single session, toggle its window
