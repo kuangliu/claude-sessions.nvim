@@ -181,7 +181,6 @@ function M._on_session_exit(record)
     end
   end
   remove_record(record)
-  notify('Session ended: ' .. record.name)
 end
 
 --- Create a NEW session and open it on the right.
