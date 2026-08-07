@@ -24,7 +24,6 @@ end
 local sessions = {}
 local current = nil
 local last_closed = nil
-local seq = 0 -- monotonic counter for display names ("claude #1", ...)
 
 -- --- Busy-state tracking -------------------------------------------------
 -- `claude agents --json` reports each independent Claude session's OS pid and
@@ -163,6 +162,23 @@ local function remove_record(record)
   end
 end
 
+--- Renumber the live sessions 1..N (in list order) so the display names never
+--- grow past the number of currently open sessions: with three sessions the
+--- statusline shows "claude #1..#3" no matter how many have been created and
+--- closed before.
+local function renumber()
+  for i, s in ipairs(sessions) do
+    local name = 'claude #' .. i
+    s.name = name
+    if s.term then
+      s.term.display_name = name
+      if s.term.bufnr and vim.api.nvim_buf_is_valid(s.term.bufnr) then
+        vim.b[s.term.bufnr].claude_session_name = name
+      end
+    end
+  end
+end
+
 -- --- Public API ----------------------------------------------------------
 
 --- on_exit callback: auto-cleanup when a claude process ends.
@@ -181,17 +197,16 @@ function M._on_session_exit(record)
     end
   end
   remove_record(record)
+  renumber()
 end
 
 --- Create a NEW session and open it on the right.
 function M.create()
-  seq = seq + 1
-  local name = 'claude #' .. seq
-  local record = { name = name }
+  local record = { name = '' } -- renumbered below
   record.term = Terminal():new({
     cmd = 'claude',
     direction = 'vertical',
-    display_name = name,
+    display_name = '', -- set by renumber()
     -- Empty string == unset for claude's child-session check (verified): this
     -- clears the marker inherited from this nvim's environment so the spawned
     -- process is treated as an independent, trackable agent.
@@ -203,16 +218,15 @@ function M.create()
   })
   table.insert(sessions, record)
   show_session(record)
-  -- Tag the buffer so the statusline can show "claude #1" instead of the raw
-  -- term:// name, and use a non-toggleterm filetype so lualine's toggleterm
-  -- extension (matches ft == 'toggleterm') does not replace the statusline
-  -- inside sessions. Toggleterm still tracks the buffer via vim.b.toggle_number.
+  -- Use a non-toggleterm filetype so lualine's toggleterm extension (matches
+  -- ft == 'toggleterm') does not replace the statusline inside sessions.
+  -- Toggleterm still tracks the buffer via vim.b.toggle_number.
   if record.term.bufnr and vim.api.nvim_buf_is_valid(record.term.bufnr) then
-    vim.b[record.term.bufnr].claude_session_name = name
     vim.bo[record.term.bufnr].ft = 'claude'
   end
+  renumber() -- names the new session (and renumbers existing ones) 1..N
   ensure_poll_timer()
-  notify('New session: ' .. name)
+  notify('New session: ' .. record.name)
   -- When <C-a> fires from inside an existing terminal (t-mode mapping), nvim's
   -- terminal handling overrides toggleterm's startinsert once the mapping
   -- completes, leaving the new session in terminal normal mode. Schedule
@@ -252,6 +266,7 @@ function M.close_current()
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
   remove_record(target)
+  renumber() -- keep display names 1..N as sessions are closed
   notify('Closed session: ' .. target.name)
   if #sessions > 0 then
     local next_session = sessions[index] or sessions[#sessions]
