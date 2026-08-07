@@ -34,11 +34,12 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ## Auto-reload
 
-While a session is running, file buffers that its `claude` process changes on
-disk are reloaded automatically (a throttled `checktime` on the plugin's poll
-timer), so Claude Code's edits appear in open buffers without `:e` or
-`autoread`. Reloads are skipped for buffers with uncommitted edits — work in
-progress is never clobbered. Disable with `auto_reload = false`:
+While a session's agent is working, file buffers it changes on disk are
+reloaded automatically (a `checktime` on the plugin's poll timer), so Claude
+Code's edits appear in open buffers without `:e` or `autoread` — plus one
+catch-up reload when the agent goes idle. Reloads are skipped for buffers with
+uncommitted edits — work in progress is never clobbered. Disable with
+`auto_reload = false`:
 
 ```lua
 {
@@ -71,3 +72,6 @@ instead of the raw `term://` buffer name.
   sessions; the filetype is re-applied on `FileType` if toggleterm resets it.
 - Sessions that exit on their own (`/exit`, crash) are removed from the list
   automatically.
+- The background poll loop (busy indicator + auto-reload) only runs while
+  sessions exist, and only actively renders while a session is busy — an idle
+  editor pays nothing.

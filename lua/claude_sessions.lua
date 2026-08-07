@@ -27,7 +27,7 @@ local opts = {
 }
 local setup_done = false
 
--- --- State ---------------------------------------------------------------
+-- --- State ----------------------------------------------------------------
 -- sessions: ordered list of live records { name, term }
 -- current:  the session whose window is currently displayed, if any
 -- last_closed: most recently closed session whose process is still alive
@@ -35,27 +35,29 @@ local sessions = {}
 local current = nil
 local last_closed = nil
 
--- --- Busy-state tracking -------------------------------------------------
--- `claude agents --json` reports each independent Claude session's OS pid and
--- status. We poll it on a timer, cache pid -> is_busy, and blink the dot of
--- every busy session on each statusline refresh.
-local busy_by_pid = {} -- map<number pid, boolean>
-local blink_on = true -- toggled once per statusline render; busy dots alternate
-local poll_timer = nil
-local fetch_inflight = false
-local fetch_tick = 0
-
-local POLL_INTERVAL_MS = 300 -- blink cadence + poll tick
-local FETCH_EVERY = 3 -- fetch `claude agents` every N ticks (=> ~0.9s)
-local CHECK_EVERY = 3 -- reload externally-changed buffers every N ticks (=> ~0.9s)
-
--- --- Notifications -------------------------------------------------------
+-- --- Notifications ---------------------------------------------------------
 
 local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
 end
 
--- --- Busy-state ----------------------------------------------------------
+-- --- Poll loop -------------------------------------------------------------
+-- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS and drives two
+-- cheap jobs: fetching each agent's busy state (`claude agents --json`) and,
+-- while anything is busy, blinking the statusline dots and auto-reloading
+-- buffers the agent changed on disk. Everything is gated on `any_busy` (or on
+-- busy<->idle transitions), so an idle editor pays nothing, and the timer
+-- stops entirely once the last session closes.
+local busy_by_pid = {} -- map<number pid, boolean>
+local any_busy = false -- is any live session's agent busy right now?
+local blink_on = true -- toggled once per statusline render; busy dots alternate
+local poll_timer = nil
+local fetch_inflight = false
+local tick = 0
+
+local POLL_INTERVAL_MS = 300 -- blink cadence + poll tick
+local FETCH_EVERY = 7 -- fetch `claude agents` every N ticks (=> ~2.1s)
+local CHECK_EVERY = 3 -- reload externally-changed buffers every N ticks (=> ~0.9s)
 
 --- OS pid of a session's claude process, or nil if it can't be determined.
 local function session_pid(s)
@@ -71,6 +73,26 @@ end
 local function session_busy(s)
   local pid = session_pid(s)
   return pid ~= nil and busy_by_pid[pid] == true
+end
+
+--- Recompute `any_busy` from the fresh pid cache. On a busy<->idle transition
+--- the statusline needs one redraw to start/stop blinking; when the agent just
+--- went quiet, one extra `checktime` picks up writes from its final working
+--- ticks.
+local function update_busy()
+  local was_busy = any_busy
+  any_busy = false
+  for _, s in ipairs(sessions) do
+    if session_busy(s) then
+      any_busy = true
+      break
+    end
+  end
+  if any_busy == was_busy then return end
+  if opts.auto_reload and was_busy and not any_busy then
+    vim.cmd('checktime')
+  end
+  vim.cmd('redrawstatus')
 end
 
 --- Async-fetch `claude agents --json` and refresh the pid -> busy cache.
@@ -98,39 +120,55 @@ local function refresh_busy_state()
         end
       end
       busy_by_pid = next_map
+      update_busy()
     end,
   })
 end
 
---- (Re)start the poll timer. Runs for the editor's lifetime; cheap when idle
---- (only blinks/refreshes while sessions exist).
-local function ensure_poll_timer()
-  if poll_timer then return end
-  poll_timer = (vim.uv or vim.loop).new_timer()
-  poll_timer:start(POLL_INTERVAL_MS, POLL_INTERVAL_MS, vim.schedule_wrap(function()
-    -- Fetch agent state on a slower sub-cycle; the blink phase is advanced
-    -- inside statusline_indicator() (one toggle per actual render), so we only
-    -- trigger redraws here for a lively cadence.
-    fetch_tick = fetch_tick + 1
-    if fetch_tick % FETCH_EVERY == 0 then
-      refresh_busy_state()
-    end
-    -- Only redraw when there is something to show, so an idle editor with no
-    -- sessions pays no cost.
-    if #sessions > 0 then
-      -- A session's claude process edits files in the background while the
-      -- user works elsewhere; pick those edits up in open buffers. `checktime`
-      -- reloads only buffers whose file changed on disk and that have no
-      -- uncommitted edits, so the user's in-progress work is never clobbered.
-      if opts.auto_reload and fetch_tick % CHECK_EVERY == 0 then
-        vim.cmd('checktime')
-      end
-      vim.cmd('redrawstatus')
-    end
-  end))
+--- Stop the poll timer. Called when the last session closes; also resets the
+--- cycle counter and busy state so a later start begins clean.
+local function stop_poll_timer()
+  if poll_timer then
+    poll_timer:stop()
+    poll_timer:close()
+    poll_timer = nil
+  end
+  tick = 0
+  any_busy = false
 end
 
--- --- Window / session helpers --------------------------------------------
+--- One timer tick: fetch agent state on a slow sub-cycle, and keep the blink
+--- (plus auto-reload) alive while something is actually busy.
+local function poll_tick()
+  tick = tick + 1
+  if #sessions == 0 then
+    stop_poll_timer()
+    return
+  end
+  if tick % FETCH_EVERY == 0 then
+    refresh_busy_state()
+  end
+  -- The blink phase is advanced inside statusline_indicator() (one toggle per
+  -- actual render), so we only redraw here to keep a lively blink while busy.
+  if any_busy then
+    -- Reload file buffers the agent is actively writing, skipping buffers
+    -- with uncommitted edits.
+    if opts.auto_reload and tick % CHECK_EVERY == 0 then
+      vim.cmd('checktime')
+    end
+    vim.cmd('redrawstatus')
+  end
+end
+
+--- (Re)start the poll timer. Cheap while idle: a tick that finds no sessions
+--- stops the timer again, so an editor with no sessions pays nothing.
+local function start_poll_timer()
+  if poll_timer then return end
+  poll_timer = (vim.uv or vim.loop).new_timer()
+  poll_timer:start(POLL_INTERVAL_MS, POLL_INTERVAL_MS, vim.schedule_wrap(poll_tick))
+end
+
+-- --- Session registry -------------------------------------------------------
 
 --- Is this terminal's window currently displayed in the UI?
 local function window_open(term)
@@ -143,6 +181,13 @@ end
 local function session_for_term(term)
   for _, s in ipairs(sessions) do
     if s.term == term then return s end
+  end
+end
+
+--- Index of `record` in the sessions list, or nil.
+local function find_session_index(record)
+  for i, s in ipairs(sessions) do
+    if s == record then return i end
   end
 end
 
@@ -167,19 +212,6 @@ local function show_session(s)
   current = s
 end
 
---- Remove a session record from the list (idempotent).
-local function remove_record(record)
-  for i, s in ipairs(sessions) do
-    if s == record then
-      table.remove(sessions, i)
-      break
-    end
-  end
-  if current == record then
-    current = nil
-  end
-end
-
 --- Renumber the live sessions 1..N (in list order) so the display names never
 --- grow past the number of currently open sessions: with three sessions the
 --- statusline shows "claude #1..#3" no matter how many have been created and
@@ -197,14 +229,22 @@ local function renumber()
   end
 end
 
--- --- Public API ----------------------------------------------------------
+--- Drop a session record: remove it from the list, renumber the rest, and
+--- forget it as current / last-closed.
+local function drop_record(record)
+  local index = find_session_index(record)
+  if index then table.remove(sessions, index) end
+  if current == record then current = nil end
+  if last_closed == record then last_closed = nil end
+  renumber()
+end
 
 --- on_exit callback: auto-cleanup when a claude process ends.
 --- Sessions run with close_on_exit = false (see create) so that a killed job's
 --- exit does not make toggleterm close the window / restore focus to the origin
 --- window; that focus restore is what makes <C-d> steal focus ~0.5s later. We
 --- tidy the window and buffer here instead.
-function M._on_session_exit(record)
+local function on_session_exit(record)
   local term = record.term
   if term then
     if window_open(term) then
@@ -214,9 +254,10 @@ function M._on_session_exit(record)
       vim.api.nvim_buf_delete(term.bufnr, { force = true })
     end
   end
-  remove_record(record)
-  renumber()
+  drop_record(record)
 end
+
+-- --- Public API -------------------------------------------------------------
 
 --- Create a NEW session and open it on the right.
 function M.create()
@@ -230,9 +271,9 @@ function M.create()
     -- process is treated as an independent, trackable agent.
     env = { CLAUDE_CODE_CHILD_SESSION = '' },
     -- Keep toggleterm from closing the window / restoring focus when the job
-    -- dies; _on_session_exit cleans up instead.
+    -- dies; on_session_exit cleans up instead.
     close_on_exit = false,
-    on_exit = function() M._on_session_exit(record) end,
+    on_exit = function() on_session_exit(record) end,
   })
   table.insert(sessions, record)
   show_session(record)
@@ -243,7 +284,7 @@ function M.create()
     vim.bo[record.term.bufnr].ft = 'claude'
   end
   renumber() -- names the new session (and renumbers existing ones) 1..N
-  ensure_poll_timer()
+  start_poll_timer()
   notify('New session: ' .. record.name)
   -- When <C-a> fires from inside an existing terminal (t-mode mapping), nvim's
   -- terminal handling overrides toggleterm's startinsert once the mapping
@@ -268,13 +309,7 @@ function M.close_current()
   local target = current or sessions[#sessions]
   local term = target.term
   -- Position of the closed session, so its successor can be shown.
-  local index
-  for i, s in ipairs(sessions) do
-    if s == target then
-      index = i
-      break
-    end
-  end
+  local index = find_session_index(target)
   -- Remember the window showing the target, so the split can be kept in place.
   local win = window_open(term) and term.window or nil
   if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
@@ -283,8 +318,7 @@ function M.close_current()
     -- window / moving focus.
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
-  remove_record(target)
-  renumber() -- keep display names 1..N as sessions are closed
+  drop_record(target)
   notify('Closed session: ' .. target.name)
   if #sessions > 0 then
     local next_session = sessions[index] or sessions[#sessions]
@@ -365,7 +399,7 @@ function M.statusline_indicator()
     return ''
   end
   -- Advance the blink phase each redraw; lualine calls this on every refresh
-  -- and the poll timer triggers extra redraws while sessions exist.
+  -- and the poll timer triggers extra redraws while a session is busy.
   blink_on = not blink_on
   local parts = {}
   for _, s in ipairs(sessions) do
