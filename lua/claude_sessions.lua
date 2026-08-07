@@ -17,6 +17,16 @@ local Terminal = function()
   return require('toggleterm.terminal').Terminal
 end
 
+-- --- Options --------------------------------------------------------------
+-- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
+-- running session's claude process changed on disk. Reloads are safe:
+-- `checktime` skips buffers with uncommitted edits, so in-progress work is
+-- never clobbered.
+local opts = {
+  auto_reload = true,
+}
+local setup_done = false
+
 -- --- State ---------------------------------------------------------------
 -- sessions: ordered list of live records { name, term }
 -- current:  the session whose window is currently displayed, if any
@@ -37,6 +47,7 @@ local fetch_tick = 0
 
 local POLL_INTERVAL_MS = 300 -- blink cadence + poll tick
 local FETCH_EVERY = 3 -- fetch `claude agents` every N ticks (=> ~0.9s)
+local CHECK_EVERY = 3 -- reload externally-changed buffers every N ticks (=> ~0.9s)
 
 -- --- Notifications -------------------------------------------------------
 
@@ -107,6 +118,13 @@ local function ensure_poll_timer()
     -- Only redraw when there is something to show, so an idle editor with no
     -- sessions pays no cost.
     if #sessions > 0 then
+      -- A session's claude process edits files in the background while the
+      -- user works elsewhere; pick those edits up in open buffers. `checktime`
+      -- reloads only buffers whose file changed on disk and that have no
+      -- uncommitted edits, so the user's in-progress work is never clobbered.
+      if opts.auto_reload and fetch_tick % CHECK_EVERY == 0 then
+        vim.cmd('checktime')
+      end
       vim.cmd('redrawstatus')
     end
   end))
@@ -360,8 +378,12 @@ function M.statusline_indicator()
   return table.concat(parts, ' ')
 end
 
---- Define the keymaps and autocmds. Called once at plugin load.
-function M.setup()
+--- Define the keymaps and autocmds. Called once at plugin load; a later call
+--- (e.g. from a lazy.nvim `config` block) only merges in options.
+function M.setup(user_opts)
+  opts = vim.tbl_deep_extend('force', opts, user_opts or {})
+  if setup_done then return end
+  setup_done = true
   vim.keymap.set({ 'n', 't' }, '<C-a>', function() M.create() end,
     { noremap = true, silent = true, desc = 'New Claude Code session' })
   vim.keymap.set({ 'n', 't' }, '<C-s>', function() M.next_session() end,
