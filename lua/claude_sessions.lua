@@ -200,6 +200,15 @@ function M.create()
   end
   ensure_poll_timer()
   notify('New session: ' .. name)
+  -- When <C-a> fires from inside an existing terminal (t-mode mapping), nvim's
+  -- terminal handling overrides toggleterm's startinsert once the mapping
+  -- completes, leaving the new session in terminal normal mode. Schedule
+  -- startinsert to run after the mapping machinery settles.
+  vim.schedule(function()
+    if vim.api.nvim_get_current_win() == record.term.window then
+      vim.cmd('startinsert')
+    end
+  end)
 end
 
 --- Close the current session (window + process) and drop it.
