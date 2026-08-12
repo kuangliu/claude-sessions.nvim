@@ -341,6 +341,33 @@ function M.close_current()
   end
 end
 
+--- Is any claude session window currently displayed in the UI?
+--- Used to enforce mutual exclusion with regular terminals: opening a
+--- terminal closes a visible session window first (see close_window), and
+--- opening a session closes open terminals via close_all_open_windows.
+function M.is_visible()
+  for _, s in ipairs(sessions) do
+    if window_open(s.term) then return true end
+  end
+  return false
+end
+
+--- Close the displayed session window(s) without killing their processes.
+--- The split closes, the closed session is remembered as last_closed so <C-s>
+--- can bring it back, and current is cleared. Returns true if any window was
+--- closed.
+function M.close_window()
+  if not M.is_visible() then return false end
+  for _, s in ipairs(sessions) do
+    if window_open(s.term) then
+      s.term:close()
+      last_closed = s
+    end
+  end
+  current = nil
+  return true
+end
+
 --- <C-s>: cycle sessions. With a single session, toggle its window
 --- open/closed. With multiple, if no session window is displayed, show the
 --- most recently closed one; otherwise switch to the next session in the
@@ -382,6 +409,9 @@ function M.next_session()
   end
 
   if window_open(target.term) then
+    -- Close any other open toggleterm window (e.g. a zsh terminal) so the
+    -- session alone is displayed, then focus it.
+    close_all_open_windows(target.term)
     target.term:focus()
     return
   end
