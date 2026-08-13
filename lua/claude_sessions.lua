@@ -368,6 +368,11 @@ function M.close_window()
   return true
 end
 
+--- Is there at least one live session?
+function M.has_sessions()
+  return #sessions > 0
+end
+
 --- <C-s>: cycle sessions. With a single session, toggle its window
 --- open/closed. With multiple, if no session window is displayed, show the
 --- most recently closed one; otherwise switch to the next session in the
