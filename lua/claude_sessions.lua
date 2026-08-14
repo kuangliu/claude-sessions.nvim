@@ -106,7 +106,7 @@ local function refresh_busy_state()
   if fetch_inflight then return end
   fetch_inflight = true
   local stdout = {}
-  vim.fn.jobstart({ 'claude', 'agents', '--json' }, {
+  local ok, job_id = pcall(vim.fn.jobstart, { 'claude', 'agents', '--json' }, {
     stdout_buffered = true,
     on_stdout = function(_, data) vim.list_extend(stdout, data or {}) end,
     on_exit = function()
@@ -123,6 +123,12 @@ local function refresh_busy_state()
       update_busy()
     end,
   })
+  if not ok or job_id <= 0 then
+    -- e.g. `claude` not on PATH when nvim was launched without the shell
+    -- environment; keep the last known busy state and retry on the next tick
+    -- instead of throwing E475
+    fetch_inflight = false
+  end
 end
 
 --- Stop the poll timer. Called when the last session closes; also resets the
