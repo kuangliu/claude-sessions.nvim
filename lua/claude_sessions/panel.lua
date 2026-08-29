@@ -42,6 +42,12 @@ M.buf = nil
 local ns = vim.api.nvim_create_namespace('claude_sessions_panel')
 local step_timer ---@type uv.uv_timer_t?
 
+-- Row the ᐅ is pinned to while a debounced step is in flight: the marker
+-- rides with the cursor, not with the switch that trails it by ~120ms. Nil
+-- whenever no step is pending — the marker then falls back to the row of the
+-- displayed session.
+local arrow_row = nil
+
 -- Fixed columns. The row of the displayed session carries a blue ᐅ in its
 -- leading gutter; the row itself IS the session number (no #N column):
 --   ' ᐅ  claude   busy'
@@ -66,16 +72,19 @@ local function tree_window()
 end
 
 -- Rewrite the rows and their highlights. Buffer line n is session n — no
--- pseudo rows, so the cursor row IS the selection. The row of the DISPLAYED
--- session carries a ᐅ in the leading gutter (the one the statusline dots mark
--- with •); the name is the agent name — `claude`, or the session's custom name
--- once one is set with `r`.
-local function render(buf, snap)
+-- pseudo rows, so the cursor row IS the selection. The ᐅ in the leading
+-- gutter marks a row — the DISPLAYED session by default (the one the
+-- statusline dots mark with •), or `pin_row` while a debounced step is in
+-- flight so the marker moves with the cursor instead of trailing it; the name
+-- is the agent name — `claude`, or the session's custom name once one is set
+-- with `r`.
+local function render(buf, snap, pin_row)
   local lines, marks = {}, {}
   for i, s in ipairs(snap) do
-    -- Gutter: the displayed session's row carries the arrow. Both spellings
-    -- are THREE display columns wide, so the name column stays aligned.
-    local gutter = s.open and ' ᐅ ' or '   '
+    -- Gutter: the pinned row carries the arrow. Both spellings are THREE
+    -- display columns wide, so the name column stays aligned.
+    local marked = (pin_row or 0) == i or (not pin_row and s.open)
+    local gutter = marked and ' ᐅ ' or '   '
     local name = s.name or 'claude'
     lines[i] = string.format('%s %-' .. STATE_PAD .. 's %s',
       gutter, name, s.busy and 'busy' or 'idle')
@@ -85,7 +94,7 @@ local function render(buf, snap)
     marks[i] = {
       off + 1 + STATE_PAD + 1, -- the busy word
       s.busy,
-      s.open and 1 or nil,     -- the arrow (only on the marked row)
+      marked and 1 or nil,     -- the arrow (only on the marked row)
     }
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
@@ -118,10 +127,12 @@ local function select_row(row, keep_focus)
 end
 
 -- <Down>/<Up>/j/k: move the cursor one row and switch to that session. The
--- switch is debounced (~120ms): held keys sweep the cursor without paying a
--- terminal open per row, and the row under the cursor when the sweep settles
--- is the one that loads. Focus ends up back on the panel, one event-loop pass
--- after the switch — see the comment inside the debounce callback.
+-- MARKER moves with the cursor — the row is re-rendered with the arrow pinned
+-- to it in the same keystroke. The switch itself is debounced (~120ms): held
+-- keys sweep the cursor without paying a terminal open per row, and the row
+-- under the cursor when the sweep settles is the one that loads. Focus ends
+-- up back on the panel, one event-loop pass after the switch — see the
+-- comment inside the debounce callback.
 local function step(dir)
   -- The panel may not currently hold focus (keys go through the terminal
   -- window that shows the cursorline'd panel below the tree); drive its
@@ -132,6 +143,11 @@ local function step(dir)
   if row < 1 or row > #snap then return end
   vim.api.nvim_win_set_cursor(M.win, { row, 0 })
 
+  -- Pin the arrow to the row just stepped onto and repaint, so it never
+  -- trails the cursor while the debounced switch is in flight.
+  arrow_row = row
+  M.refresh()
+
   if step_timer then
     pcall(function() step_timer:stop() end)
     pcall(function() step_timer:close() end)
@@ -140,6 +156,10 @@ local function step(dir)
     step_timer = nil
     if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
     select_row(vim.api.nvim_win_get_cursor(M.win)[1], true)
+    -- The switch settled: the displayed session now IS the cursor row, so the
+    -- pin can drop and the marker rests on the displayed session again.
+    arrow_row = nil
+    M.refresh()
     -- select_row left focus on the just-opened terminal, where any startinsert
     -- toggleterm queued behind this switch fires harmlessly. Take the focus
     -- back in the SAME event-loop pass — vim.schedule runs FIFO behind those
@@ -187,6 +207,7 @@ function M.close()
     pcall(function() step_timer:close() end)
     step_timer = nil
   end
+  arrow_row = nil
   if M.win and vim.api.nvim_win_is_valid(M.win) then
     pcall(vim.api.nvim_win_close, M.win, true)
   end
@@ -208,7 +229,7 @@ function M.refresh()
     return
   end
   local row = vim.api.nvim_win_get_cursor(M.win)[1]
-  render(M.buf, snap)
+  render(M.buf, snap, arrow_row)
   pcall(vim.api.nvim_win_set_cursor, M.win, { math.min(math.max(row, 1), #snap), 0 })
 end
 
