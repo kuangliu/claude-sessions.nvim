@@ -636,16 +636,27 @@ function M.setup(user_opts)
   vim.keymap.set('t', '<C-d>', function() M.close_current() end,
     { noremap = true, silent = true, desc = 'Close Claude Code session' })
 
-  -- Remember manually closed session windows (e.g. :close) so <C-s> can bring
-  -- the most recently closed session back.
+  -- Remember manually closed session windows (e.g. :close, <C-w>c, q) so
+  -- <C-s> can bring the most recently closed session back — and drop the
+  -- panel when the last displayed window goes: closing the window directly
+  -- bypasses close_window(), which is where the panel usually learns about
+  -- visibility changes. WinClosed fires while the window is still valid
+  -- (nvim tears it down after the event), so is_visible() would read true and
+  -- keep the panel — defer the sync one event-loop pass, when the window is
+  -- really gone.
   vim.api.nvim_create_autocmd('WinClosed', {
     callback = function(args)
       local wid = tonumber(args.match)
+      local found = false
       for _, s in ipairs(sessions) do
         if s.term.window == wid then
           last_closed = s
+          found = true
           break
         end
+      end
+      if found then
+        vim.schedule(panel_sync)
       end
     end,
   })
