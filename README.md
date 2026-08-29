@@ -36,7 +36,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 While a session window is displayed, a session-list panel is split below
 nvim-tree (styled after diffview's commit-history panel): one row per session
-with its index, window state (`open`/`closed`) and busy state (`busy`/`idle`,
+with its index, the agent name (`claude`) and busy state (`busy`/`idle`,
 the same busy signal as the statusline dots). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the

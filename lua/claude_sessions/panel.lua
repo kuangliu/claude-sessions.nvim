@@ -1,6 +1,6 @@
 -- The session-list panel split below nvim-tree, styled after diffview's
 -- commit-history panel: one fixed-column row per live claude session (index,
--- window state, busy state), cursorline browsing, debounced stepping that
+-- agent name, busy state), cursorline browsing, debounced stepping that
 -- switches sessions live.
 --
 -- Shown while a session window is displayed and an nvim-tree window exists to
@@ -39,8 +39,8 @@ local ns = vim.api.nvim_create_namespace('claude_sessions_panel')
 local step_timer ---@type uv.uv_timer_t?
 
 -- Fixed columns (0-based), mirroring the commit panel's hash column:
---   ' #1   open     busy'
---    ^1   ^6       ^15
+--   ' #1   claude   busy'
+--    ^1   ^6        ^15
 local ID_PAD = 4
 local STATE_PAD = 8
 local BUSY_COL = 1 + ID_PAD + 1 + STATE_PAD + 1
@@ -64,12 +64,14 @@ local function tree_window()
 end
 
 -- Rewrite the rows and their highlights. Buffer line n is session n — no
--- pseudo rows, so the cursor row IS the selection.
+-- pseudo rows, so the cursor row IS the selection. The middle word is the
+-- agent name, constant across rows: the open/closed split lives in the tree
+-- of windows on the right, not in the list.
 local function render(buf, snap)
   local lines = {}
   for i, s in ipairs(snap) do
     lines[i] = string.format(' %-' .. ID_PAD .. 's %-' .. STATE_PAD .. 's %s',
-      '#' .. i, s.open and 'open' or 'closed', s.busy and 'busy' or 'idle')
+      '#' .. i, 'claude', s.busy and 'busy' or 'idle')
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
