@@ -386,8 +386,9 @@ function M.setup()
   vim.api.nvim_create_autocmd('ColorScheme', { callback = define_highlights })
   install_mode_guard()
 
-  -- When the tree opens while a session window is displayed, attach the panel
-  -- below it (and hand focus back to the tree the user just opened).
+  -- The panel follows the tree: when the tree opens while a session window is
+  -- displayed, attach the panel below it (handing focus back to the tree the
+  -- user just opened); when the tree closes, the panel goes with it.
   vim.api.nvim_create_autocmd('FileType', {
     pattern = 'NvimTree',
     callback = function()
@@ -409,6 +410,22 @@ function M.setup()
           pcall(vim.api.nvim_set_current_win, tw)
         end
       end)
+    end,
+  })
+  -- Tree closed (<Leader>f toggle, :NvimTreeClose, q in the tree): the panel
+  -- split below it goes with it. view.close() only closes the tree window (the
+  -- NvimTree buffer survives for the next toggle), so the reliable signal is
+  -- WinClosed for a window showing the tree's buffer. Match any window id and
+  -- check the buffer inside — the WinClosed pattern is the window-id string.
+  vim.api.nvim_create_autocmd('WinClosed', {
+    pattern = '*',
+    callback = function(ev)
+      local winid = tonumber(ev.match)
+      if not winid then return end
+      local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
+      if not ok or not buf or vim.bo[buf].filetype ~= 'NvimTree' then return end
+      if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+      M.close()
     end,
   })
 end
