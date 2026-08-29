@@ -42,13 +42,15 @@ M.buf = nil
 local ns = vim.api.nvim_create_namespace('claude_sessions_panel')
 local step_timer ---@type uv.uv_timer_t?
 
--- Fixed columns. The row of the displayed session carries a ᐅ in its leading
--- gutter; the row itself IS the session number (no #N column):
---   ' ᐅ claude   busy'
+-- Fixed columns. The row of the displayed session carries a blue ᐅ in its
+-- leading gutter; the row itself IS the session number (no #N column):
+--   ' ᐅ  claude   busy'
 local STATE_PAD = 8
 
 local function define_highlights()
-  -- onedark's green and comment grey for the busy / idle words.
+  -- Same accent blue as diffview's commit hashes for the arrow; onedark's
+  -- green and comment grey for the busy / idle words.
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelArrow', { fg = '#61afef' })
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#98c379' })
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#5c6370' })
 end
@@ -71,18 +73,19 @@ end
 local function render(buf, snap)
   local lines, marks = {}, {}
   for i, s in ipairs(snap) do
-    -- Gutter: the displayed session's row carries ᐅ. Both spellings are TWO
-    -- display columns wide, so the name column stays aligned.
-    local gutter = s.open and ' ᐅ' or '  '
+    -- Gutter: the displayed session's row carries the arrow. Both spellings
+    -- are THREE display columns wide, so the name column stays aligned.
+    local gutter = s.open and ' ᐅ ' or '   '
     local name = s.name or 'claude'
     lines[i] = string.format('%s %-' .. STATE_PAD .. 's %s',
       gutter, name, s.busy and 'busy' or 'idle')
-    -- Extmark columns are BYTE offsets: the arrow gutter is two bytes longer
-    -- than the blank one, so the marked row's busy column sits 2 bytes later.
-    local off = #gutter -- 4 on the marked row, 2 elsewhere
+    -- Extmark columns are BYTE offsets: the arrow is 3 bytes (1 column), so
+    -- the marked row's busy column sits 2 bytes later than the blank gutter.
+    local off = #gutter -- 5 on the marked row, 3 elsewhere
     marks[i] = {
       off + 1 + STATE_PAD + 1, -- the busy word
       s.busy,
+      s.open and 1 or nil,     -- the arrow (only on the marked row)
     }
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
@@ -91,6 +94,12 @@ local function render(buf, snap)
   vim.bo[buf].modifiable = false
   for i, m in ipairs(marks) do
     local lnum = i - 1 -- 0-based extmark row
+    if m[3] then
+      -- the arrow, in the commit panel's hash accent
+      vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
+        end_col = 4, hl_group = 'ClaudeSessionsPanelArrow',
+      })
+    end
     -- the busy word: green while the agent works, comment grey when idle
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, m[1], {
       end_col = m[1] + 4,
