@@ -282,6 +282,9 @@ function M.open()
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
   vim.keymap.set('n', '<C-d>', close_current_row,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
+  -- the vim-ish spelling of the same close: dd, like deleting a line
+  vim.keymap.set('n', 'dd', close_current_row,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
   vim.keymap.set('n', 'r', rename_current_row,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: rename session' })
   -- moving through the list switches sessions as it goes (debounced while held)
