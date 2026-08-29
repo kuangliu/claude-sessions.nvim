@@ -15,10 +15,12 @@
 local M = {}
 
 -- Bound by the main module: `snapshot()` returns the live sessions as an
--- array of { busy = bool, open = bool } (array index == session number), and
--- `show(i)` displays session i.
+-- array of { busy = bool, open = bool } (array index == session number),
+-- `show(i)` displays session i, and `close_session(i)` kills session i.
+-- (Named close_session: M.close below tears the panel itself down.)
 M.snapshot = nil
 M.show = nil
+M.close_session = nil
 
 -- True while the panel is driving a switch (stepping): show_session then
 -- skips its focus juggling so the cursor stays on the panel.
@@ -138,6 +140,15 @@ local function open_current()
   select_row(vim.api.nvim_win_get_cursor(M.win)[1], false)
 end
 
+-- <C-d>: kill the session under the cursor. Same semantics as terminal-mode
+-- <C-d>: the process dies, the row disappears, the split shows the next
+-- session. Focus stays on the panel.
+local function close_current_row()
+  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  local row = vim.api.nvim_win_get_cursor(M.win)[1]
+  M.close_session(row)
+end
+
 -- Tear the panel down (window + buffer). Sessions keep running.
 function M.close()
   if step_timer then
@@ -243,6 +254,8 @@ function M.open()
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
   vim.keymap.set('n', 'o', open_current,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
+  vim.keymap.set('n', '<C-d>', close_current_row,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
   -- moving through the list switches sessions as it goes (debounced while held)
   vim.keymap.set('n', '<Down>', function() step(1) end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: next session' })

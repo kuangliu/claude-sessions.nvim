@@ -324,6 +324,12 @@ panel.show = function(i)
   local s = sessions[i]
   if s then show_session(s) end
 end
+--- The panel's <C-d>: kill the session on that row. `M.close_current` is
+--- defined below (public API), so this closure resolves it at call time.
+panel.close_session = function(i)
+  local s = sessions[i]
+  if s then M.close_current(s, { stepping = true }) end
+end
 
 --- Renumber the live sessions 1..N (in list order) so the display names never
 --- grow past the number of currently open sessions: with three sessions the
@@ -411,25 +417,33 @@ function M.create()
   end)
 end
 
---- Close the current session (window + process) and drop it.
---- The split stays occupied: the session that followed the closed one (or the
---- last remaining one, if the closed one was last) is shown in its place.
---- If no window is displayed, closes the most recently created session.
-function M.close_current()
+--- Close a session (window + process) and drop it. `target` picks the session;
+--- default is the displayed one (or the most recently created when none is
+--- displayed). The split stays occupied: the session that followed the closed
+--- one (or the last remaining one, if the closed one was last) is shown in its
+--- place. With `opts.stepping` (a panel-driven close) focus stays on the
+--- panel: the successor is still swapped into the split, but silently, and
+--- closing a background session leaves the display alone.
+function M.close_current(target, opts)
+  opts = opts or {}
   if #sessions == 0 then
     notify('No claude sessions to close.', vim.log.levels.WARN)
     return
   end
-  local target = current or sessions[#sessions]
+  target = target or current or sessions[#sessions]
   local term = target.term
   -- Position of the closed session, so its successor can be shown.
   local index = find_session_index(target)
+  -- Panel-driven close: the list keeps focus and drives the display silently.
+  local stepping = opts.stepping or panel.stepping
   -- Remember the window showing the target, so the split can be kept in place.
   local win = window_open(term) and term.window or nil
   if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
     -- Wiping the terminal buffer kills the claude job; the record is dropped
     -- below. close_on_exit = false keeps the job's later exit from closing the
-    -- window / moving focus.
+    -- window / moving focus. Deleting the LAST buffer of its window also tears
+    -- the window down, so `win` may be invalid afterwards — the branches below
+    -- re-check.
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
   drop_record(target)
@@ -441,16 +455,46 @@ function M.close_current()
       -- in place (no window close/reopen, so the statusline and bufferline get
       -- a single clean update instead of flickering).
       close_all_open_windows(next_session.term)
-      vim.api.nvim_set_current_win(win)
       vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
       next_session.term.window = win
       current = next_session
       -- The window inherited the closed session's highlights; apply the new
       -- session's.
       require('toggleterm.ui').hl_term(next_session.term)
-      vim.cmd('startinsert')
       panel.open()
-      panel.follow()
+      if stepping then
+        -- Panel-driven: the successor is displayed, but the cursor stays on
+        -- the panel where the user closed (rows shifted, refresh clamps it).
+        -- The terminal takes insert mode when the user next enters it.
+      else
+        vim.api.nvim_set_current_win(win)
+        vim.cmd('startinsert')
+        panel.follow()
+      end
+    elseif stepping then
+      -- Either a background close (nothing on screen was showing it: only the
+      -- rows shrink) or the displayed session's window went away with its
+      -- buffer: show the successor through the normal path — panel.stepping
+      -- keeps show_session from letting toggleterm request insert mode.
+      if next_session and window_open(next_session.term) then
+        panel.refresh()
+      else
+        panel.stepping = stepping
+        show_session(next_session)
+        panel.stepping = false
+        -- show_session left focus on the just-opened terminal for this pass
+        -- (see its stepping comment); no panel.step is driving this close, so
+        -- re-claim the panel one scheduled pass later — FIFO behind any
+        -- startinsert closures toggleterm queued, which fire harmlessly on the
+        -- terminal.
+        vim.schedule(function()
+          if vim.bo.filetype == 'claude-sessions-panel' then
+            if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
+          elseif panel.win and vim.api.nvim_win_is_valid(panel.win) then
+            vim.api.nvim_set_current_win(panel.win)
+          end
+        end)
+      end
     else
       show_session(next_session)
     end

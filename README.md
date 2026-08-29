@@ -39,9 +39,11 @@ nvim-tree (styled after diffview's commit-history panel): one row per session
 with its index, window state (`open`/`closed`) and busy state (`busy`/`idle`,
 the same busy signal as the statusline dots). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
-session under the cursor and focus it; `q` closes the panel without touching
-the sessions. The panel appears when a session is shown, refreshes on
-create/close/switch, and closes when the last displayed session closes.
+session under the cursor and focus it; `<C-d>` closes the session under the
+cursor (kills the process, same as terminal-mode `<C-d>`); `q` closes the
+panel without touching the sessions. The panel appears when a session is
+shown, refreshes on create/close/switch, and closes when the last displayed
+session closes.
 
 ## Auto-reload
 
