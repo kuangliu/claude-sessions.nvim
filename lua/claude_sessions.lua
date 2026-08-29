@@ -254,6 +254,18 @@ end
 --- the panel is stepping (j/k), where the panel keeps the cursor.
 local function show_session(s)
   local stepping = panel.stepping
+  -- Already displayed: opening again would split a second window over the
+  -- same terminal (toggleterm's open() always spawns a new split). Just focus
+  -- the existing window — l/<CR> on the displayed row means "show me it".
+  if window_open(s.term) then
+    current = s
+    panel.follow()
+    local tw = s.term.window
+    if tw and vim.api.nvim_win_is_valid(tw) then
+      pcall(vim.api.nvim_set_current_win, tw)
+    end
+    return
+  end
   panel.switching = true -- hold the panel open through the window churn
   -- While the panel is stepping, toggleterm's BufEnter handler must not see
   -- the terminal: with persist_mode = false it schedules a startinsert on
