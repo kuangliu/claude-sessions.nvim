@@ -1,7 +1,7 @@
 -- The session-list panel split below nvim-tree, styled after diffview's
--- commit-history panel: one fixed-column row per live claude session (index,
--- agent name, busy state), cursorline browsing, debounced stepping that
--- switches sessions live.
+-- commit-history panel: one fixed-column row per live claude session (agent
+-- name, busy state), cursorline browsing, debounced stepping that switches
+-- sessions live.
 --
 -- Shown while a session window is displayed and an nvim-tree window exists to
 -- split below; closed when the last displayed session closes. The panel never
@@ -15,10 +15,10 @@
 local M = {}
 
 -- Bound by the main module: `snapshot()` returns the live sessions as an
--- array of { busy = bool, open = bool } (array index == session number),
--- `show(i)` displays session i, `close_session(i)` kills session i,
--- `row_name(i)` is the session's display name (rename prompt default), and
--- `rename_session(i, name)` renames it.
+-- array of { busy = bool, open = bool, name = string? } (array index ==
+-- session number), `show(i)` displays session i, `close_session(i)` kills
+-- session i, `row_name(i)` is the session's display name (rename prompt
+-- default), and `rename_session(i, name)` renames it.
 -- (Named close_session: M.close below tears the panel itself down.)
 M.snapshot = nil
 M.show = nil
@@ -52,6 +52,12 @@ local arrow_row = nil
 -- leading gutter; the row itself IS the session number (no #N column):
 --   ' ᐅ  claude   busy'
 local STATE_PAD = 8
+-- Both gutter spellings are THREE display columns wide, so the name column
+-- stays aligned across rows. ᐅ is 3 bytes / 1 display column — and extmark
+-- columns are BYTE offsets — so the marked row's later columns sit 2 bytes
+-- further out than the blank gutter's.
+local ARROW_GUTTER = ' ᐅ '
+local BLANK_GUTTER = '   '
 
 local function define_highlights()
   -- Same accent blue as diffview's commit hashes for the arrow; onedark's
@@ -71,48 +77,72 @@ local function tree_window()
   end
 end
 
+--- Is the panel window (still) up?
+local function active()
+  return M.win ~= nil and vim.api.nvim_win_is_valid(M.win)
+end
+
+--- Stop and dispose of a uv timer. Either call can fail on an already-closed
+--- timer; ignore that.
+local function cancel_timer(timer)
+  if not timer then return end
+  pcall(function() timer:stop() end)
+  pcall(function() timer:close() end)
+end
+
+--- Leave insert/terminal-pending mode if we're in either. The mode read is
+--- accurate here, unlike inside InsertEnter (see install_mode_guard).
+local function leave_insert()
+  if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
+end
+
+--- One event-loop pass from now: leave insert and put focus back on the
+--- panel. Runs FIFO behind any startinsert closures toggleterm queued behind
+--- a programmatic switch — those fire while the just-opened terminal still
+--- holds focus, where they are harmless; even a stray insert that lands on
+--- the panel lives for microseconds and is never painted.
+function M.reclaim_focus()
+  vim.schedule(function()
+    if not active() then return end
+    leave_insert()
+    if vim.api.nvim_get_current_win() ~= M.win then
+      vim.api.nvim_set_current_win(M.win)
+    end
+  end)
+end
+
 -- Rewrite the rows and their highlights. Buffer line n is session n — no
 -- pseudo rows, so the cursor row IS the selection. The ᐅ in the leading
 -- gutter marks a row — the DISPLAYED session by default (the one the
 -- statusline dots mark with •), or `pin_row` while a debounced step is in
--- flight so the marker moves with the cursor instead of trailing it; the name
+-- flight so the marker moves with the cursor instead of trailing it. The name
 -- is the agent name — `claude`, or the session's custom name once one is set
 -- with `r`.
 local function render(buf, snap, pin_row)
-  local lines, marks = {}, {}
+  local lines, arrow_rows, busy_cols = {}, {}, {}
   for i, s in ipairs(snap) do
-    -- Gutter: the pinned row carries the arrow. Both spellings are THREE
-    -- display columns wide, so the name column stays aligned.
     local marked = (pin_row or 0) == i or (not pin_row and s.open)
-    local gutter = marked and ' ᐅ ' or '   '
-    local name = s.name or 'claude'
+    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
     lines[i] = string.format('%s %-' .. STATE_PAD .. 's %s',
-      gutter, name, s.busy and 'busy' or 'idle')
-    -- Extmark columns are BYTE offsets: the arrow is 3 bytes (1 column), so
-    -- the marked row's busy column sits 2 bytes later than the blank gutter.
-    local off = #gutter -- 5 on the marked row, 3 elsewhere
-    marks[i] = {
-      off + 1 + STATE_PAD + 1, -- the busy word
-      s.busy,
-      marked and 1 or nil,     -- the arrow (only on the marked row)
-    }
+      gutter, s.name or 'claude', s.busy and 'busy' or 'idle')
+    busy_cols[i] = #gutter + 1 + STATE_PAD + 1 -- the busy word (byte offset)
+    if marked then arrow_rows[#arrow_rows + 1] = i - 1 end
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  for i, m in ipairs(marks) do
-    local lnum = i - 1 -- 0-based extmark row
-    if m[3] then
-      -- the arrow, in the commit panel's hash accent
-      vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
-        end_col = 4, hl_group = 'ClaudeSessionsPanelArrow',
-      })
-    end
+  for _, lnum in ipairs(arrow_rows) do
+    -- the arrow, in the commit panel's hash accent
+    vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
+      end_col = 4, hl_group = 'ClaudeSessionsPanelArrow',
+    })
+  end
+  for i, col in ipairs(busy_cols) do
     -- the busy word: green while the agent works, comment grey when idle
-    vim.api.nvim_buf_set_extmark(buf, ns, lnum, m[1], {
-      end_col = m[1] + 4,
-      hl_group = m[2] and 'ClaudeSessionsPanelBusy' or 'ClaudeSessionsPanelIdle',
+    vim.api.nvim_buf_set_extmark(buf, ns, i - 1, col, {
+      end_col = col + 4,
+      hl_group = snap[i].busy and 'ClaudeSessionsPanelBusy' or 'ClaudeSessionsPanelIdle',
     })
   end
 end
@@ -130,14 +160,12 @@ end
 -- MARKER moves with the cursor — the row is re-rendered with the arrow pinned
 -- to it in the same keystroke. The switch itself is debounced (~120ms): held
 -- keys sweep the cursor without paying a terminal open per row, and the row
--- under the cursor when the sweep settles is the one that loads. Focus ends
--- up back on the panel, one event-loop pass after the switch — see the
--- comment inside the debounce callback.
+-- under the cursor when the sweep settles is the one that loads.
 local function step(dir)
   -- The panel may not currently hold focus (keys go through the terminal
   -- window that shows the cursorline'd panel below the tree); drive its
   -- cursor from wherever we are.
-  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  if not active() then return end
   local snap = M.snapshot and M.snapshot() or {}
   local row = vim.api.nvim_win_get_cursor(M.win)[1] + dir
   if row < 1 or row > #snap then return end
@@ -148,34 +176,24 @@ local function step(dir)
   arrow_row = row
   M.refresh()
 
-  if step_timer then
-    pcall(function() step_timer:stop() end)
-    pcall(function() step_timer:close() end)
-  end
+  cancel_timer(step_timer)
   step_timer = vim.defer_fn(function()
     step_timer = nil
-    if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+    if not active() then return end
     select_row(vim.api.nvim_win_get_cursor(M.win)[1], true)
     -- The switch settled: the displayed session now IS the cursor row, so the
-    -- pin can drop and the marker rests on the displayed session again.
+    -- pin drops and the marker rests on the displayed session again.
     arrow_row = nil
     M.refresh()
-    -- select_row left focus on the just-opened terminal, where any startinsert
-    -- toggleterm queued behind this switch fires harmlessly. Take the focus
-    -- back in the SAME event-loop pass — vim.schedule runs FIFO behind those
-    -- queued closures with no redraw in between, so even a stray insert that
-    -- lands on the panel lives for microseconds and is never painted.
-    vim.schedule(function()
-      if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
-      if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
-      vim.api.nvim_set_current_win(M.win)
-    end)
+    -- select_row left focus on the just-opened terminal; take it back one
+    -- pass later (see reclaim_focus for why).
+    M.reclaim_focus()
   end, 120)
 end
 
 -- <CR>/l/o: switch to the session under the cursor and focus it.
 local function open_current()
-  if not M.win or not vim.api.nvim_win_is_valid(M.win) then return end
+  if not active() then return end
   select_row(vim.api.nvim_win_get_cursor(M.win)[1], false)
 end
 
@@ -183,15 +201,14 @@ end
 -- <C-d>: the process dies, the row disappears, the split shows the next
 -- session. Focus stays on the panel.
 local function close_current_row()
-  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
-  local row = vim.api.nvim_win_get_cursor(M.win)[1]
-  M.close_session(row)
+  if not active() then return end
+  M.close_session(vim.api.nvim_win_get_cursor(M.win)[1])
 end
 
 -- <r>: rename the session under the cursor. An empty input restores the
 -- default `claude` name; Esc cancels.
 local function rename_current_row()
-  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  if not active() then return end
   local row = vim.api.nvim_win_get_cursor(M.win)[1]
   local default = M.row_name and M.row_name(row) or ''
   vim.ui.input({ prompt = 'Session name: ', default = default }, function(value)
@@ -202,13 +219,10 @@ end
 
 -- Tear the panel down (window + buffer). Sessions keep running.
 function M.close()
-  if step_timer then
-    pcall(function() step_timer:stop() end)
-    pcall(function() step_timer:close() end)
-    step_timer = nil
-  end
+  cancel_timer(step_timer)
+  step_timer = nil
   arrow_row = nil
-  if M.win and vim.api.nvim_win_is_valid(M.win) then
+  if active() then
     pcall(vim.api.nvim_win_close, M.win, true)
   end
   if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
@@ -220,7 +234,7 @@ end
 -- Rewrite the rows in place (no window churn); drops the panel when the last
 -- session is gone.
 function M.refresh()
-  if not (M.win and vim.api.nvim_win_is_valid(M.win) and M.buf and vim.api.nvim_buf_is_valid(M.buf)) then
+  if not (active() and M.buf and vim.api.nvim_buf_is_valid(M.buf)) then
     return
   end
   local snap = M.snapshot and M.snapshot() or {}
@@ -243,7 +257,7 @@ function M.sync(visible)
   if M.switching then return end
   if not visible then
     M.close()
-  elseif M.win and vim.api.nvim_win_is_valid(M.win) then
+  elseif active() then
     M.refresh()
   end
 end
@@ -251,7 +265,7 @@ end
 -- Move the panel cursor to the row of the currently displayed session (the
 -- switch machinery marks it `open`). Called after a <C-s> switch settles.
 function M.follow()
-  if M.switching or not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  if M.switching or not active() then return end
   local snap = M.snapshot and M.snapshot() or {}
   for i, s in ipairs(snap) do
     if s.open then
@@ -261,11 +275,50 @@ function M.follow()
   end
 end
 
+local function make_panel_buffer()
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].buftype = 'nofile'
+  vim.bo[buf].filetype = 'claude-sessions-panel'
+  vim.bo[buf].bufhidden = 'hide'
+  vim.bo[buf].buflisted = false
+  vim.bo[buf].swapfile = false
+  return buf
+end
+
+-- Panel keymaps. Editing keys have no business here, and on a nomodifiable
+-- buffer nvim refuses them with a noisy E21 (the reported error). Silence the
+-- common ones FIRST so the functional maps below win; everything else keeps
+-- its default.
+local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u', '<C-a>' }
+
+local function set_keymaps(buf)
+  for _, key in ipairs(SILENCED_KEYS) do
+    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
+  end
+  local function map(key, fn, desc)
+    vim.keymap.set('n', key, fn,
+      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
+  end
+  map('q', function() M.close() end, 'close panel')
+  map('<CR>', open_current, 'open session')
+  map('l', open_current, 'open session')
+  map('o', open_current, 'open session')
+  map('<C-d>', close_current_row, 'close session')
+  -- the vim-ish spelling of the same close: dd, like deleting a line
+  map('dd', close_current_row, 'close session')
+  map('r', rename_current_row, 'rename session')
+  -- moving through the list switches sessions as it goes (debounced while held)
+  map('<Down>', function() step(1) end, 'next session')
+  map('j', function() step(1) end, 'next session')
+  map('<Up>', function() step(-1) end, 'previous session')
+  map('k', function() step(-1) end, 'previous session')
+end
+
 -- (Re)open the panel below the nvim-tree window and fill in the rows. No-op
 -- without a visible tree or with no sessions. Already open → refresh only.
 -- The split takes focus; callers hand it back to where it belongs.
 function M.open()
-  if M.win and vim.api.nvim_win_is_valid(M.win) and M.buf and vim.api.nvim_buf_is_valid(M.buf) then
+  if active() and M.buf and vim.api.nvim_buf_is_valid(M.buf) then
     M.refresh()
     return
   end
@@ -275,13 +328,7 @@ function M.open()
   local tw = tree_window()
   if not tw then return end
 
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype = 'nofile'
-  vim.bo[buf].filetype = 'claude-sessions-panel'
-  vim.bo[buf].bufhidden = 'hide'
-  vim.bo[buf].buflisted = false
-  vim.bo[buf].swapfile = false
-
+  local buf = make_panel_buffer()
   -- Fixed height: 30% of the screen, like diffview's commit panel cap.
   local height = math.floor(vim.o.lines * 0.3)
   vim.api.nvim_set_current_win(tw)
@@ -297,39 +344,7 @@ function M.open()
 
   M.buf, M.win = buf, win
   render(buf, snap)
-
-  -- Editing keys have no business here, and on a nomodifiable buffer nvim
-  -- refuses them with a noisy E21 (the reported error). Silence the common
-  -- ones FIRST so the functional maps below win; everything else keeps its
-  -- default.
-  for _, key in ipairs({ 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u', '<C-a>' }) do
-    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
-  end
-
-  vim.keymap.set('n', 'q', function() M.close() end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close panel' })
-  vim.keymap.set('n', '<CR>', open_current,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
-  vim.keymap.set('n', 'l', open_current,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
-  vim.keymap.set('n', 'o', open_current,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
-  vim.keymap.set('n', '<C-d>', close_current_row,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
-  -- the vim-ish spelling of the same close: dd, like deleting a line
-  vim.keymap.set('n', 'dd', close_current_row,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
-  vim.keymap.set('n', 'r', rename_current_row,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: rename session' })
-  -- moving through the list switches sessions as it goes (debounced while held)
-  vim.keymap.set('n', '<Down>', function() step(1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: next session' })
-  vim.keymap.set('n', 'j', function() step(1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: next session' })
-  vim.keymap.set('n', '<Up>', function() step(-1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: previous session' })
-  vim.keymap.set('n', 'k', function() step(-1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: previous session' })
+  set_keymaps(buf)
 
   -- The window can also go away on its own (:close on the panel, tree-side
   -- layout edits); forget it so the next open() rebuilds cleanly.
@@ -385,13 +400,25 @@ local function install_mode_guard()
       return orig_cmd[k]
     end,
   })
+
   -- Belt: insert mode entering on the panel is left immediately. InsertEnter
   -- fires BEFORE the new mode is observable — vim.fn.mode() still reads 'n'
   -- inside the callback — so a mode check here would never fire; the event
-  -- itself IS the signal, stopinsert unconditionally.
+  -- itself IS the signal, stopinsert unconditionally. Modifiable is flipped
+  -- on for the duration so edits queued by a race ahead of the vim.cmd guard
+  -- above are absorbed without E21, and restored on leave.
   vim.api.nvim_create_autocmd('InsertEnter', {
-    callback = function()
-      if vim.bo.filetype == 'claude-sessions-panel' then vim.cmd('stopinsert') end
+    callback = function(ev)
+      if vim.bo.filetype ~= 'claude-sessions-panel' then return end
+      vim.cmd('stopinsert')
+      vim.bo[ev.buf].modifiable = true
+    end,
+  })
+  vim.api.nvim_create_autocmd('InsertLeave', {
+    callback = function(ev)
+      if vim.bo[ev.buf].filetype == 'claude-sessions-panel' then
+        vim.bo[ev.buf].modifiable = false
+      end
     end,
   })
   -- ModeChanged fires AFTER the switch, so there the mode read is accurate —
@@ -404,24 +431,10 @@ local function install_mode_guard()
   })
   -- If insert still managed to land (a render window with modifiable=true,
   -- a race ahead of the guards above), queued keys would edit this buffer —
-  -- blank every char before it lands, and restore the write lock on leave.
+  -- blank every char before it lands.
   vim.api.nvim_create_autocmd('InsertCharPre', {
     callback = function()
       if vim.bo.filetype == 'claude-sessions-panel' then vim.v.char = '' end
-    end,
-  })
-  vim.api.nvim_create_autocmd('InsertEnter', {
-    callback = function(ev)
-      if vim.bo.filetype ~= 'claude-sessions-panel' then return end
-      vim.cmd('stopinsert')
-      vim.bo[ev.buf].modifiable = true -- absorb queued edits without E21
-    end,
-  })
-  vim.api.nvim_create_autocmd('InsertLeave', {
-    callback = function(ev)
-      if vim.bo[ev.buf].filetype == 'claude-sessions-panel' then
-        vim.bo[ev.buf].modifiable = false
-      end
     end,
   })
   -- Braces: a stray startinsert can also slip through between events; the
@@ -457,7 +470,7 @@ function M.setup()
         end
         if not visible then return end
         if not tree_window() then return end
-        if M.win and vim.api.nvim_win_is_valid(M.win) then
+        if active() then
           M.refresh() -- panel already up: just re-sync the rows
           return
         end
@@ -481,7 +494,7 @@ function M.setup()
       if not winid then return end
       local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
       if not ok or not buf or vim.bo[buf].filetype ~= 'NvimTree' then return end
-      if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+      if not active() then return end
       M.close()
     end,
   })
