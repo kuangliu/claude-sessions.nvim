@@ -6,6 +6,11 @@
 -- toggleterm persists the split width and every session opens via the same
 -- botright vsplit + vertical resize path.
 --
+-- While a session window is displayed, a session-list panel is split below
+-- nvim-tree (diffview's commit-panel style): one row per session with its
+-- window and busy state; j/k steps through the list switching sessions live.
+-- See claude_sessions/panel.lua.
+--
 -- Keymaps:
 --   <C-a>  create a new session and open it on the right
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
@@ -16,6 +21,8 @@ local M = {}
 local Terminal = function()
   return require('toggleterm.terminal').Terminal
 end
+
+local panel = require('claude_sessions.panel')
 
 -- --- Options --------------------------------------------------------------
 -- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
@@ -92,6 +99,7 @@ local function update_busy()
   if opts.auto_reload and was_busy and not any_busy then
     vim.cmd('checktime')
   end
+  panel.refresh() -- busy/idle words on the panel rows
   vim.cmd('redrawstatus')
 end
 
@@ -151,6 +159,8 @@ local function poll_tick()
     stop_poll_timer()
     return
   end
+  -- Panel mode guard's periodic check (see panel.install_mode_guard).
+  vim.cmd('doautocmd User ClaudeSessionsTick')
   if tick % FETCH_EVERY == 0 then
     refresh_busy_state()
   end
@@ -197,25 +207,122 @@ local function find_session_index(record)
   end
 end
 
+-- Panel wiring. panel.lua is required at the top, but its snapshot/show
+-- closures need the registry helpers, and close_all_open_windows below needs
+-- panel_sync — so all three are defined here, ahead of first use.
+--- The panel's rows: live sessions in list order as { busy, open }.
+panel.snapshot = function()
+  local snap = {}
+  for i, s in ipairs(sessions) do
+    snap[i] = { busy = session_busy(s), open = window_open(s.term) }
+  end
+  return snap
+end
+panel.show = function(i)
+  local s = sessions[i]
+  if s then show_session(s) end
+end
+
+--- Push the registry/window state to the panel: re-render its rows, or close
+--- it when nothing is displayed anymore.
+local function panel_sync()
+  panel.sync(M.is_visible())
+end
+
 --- Close the window of every displayed toggleterm terminal except `keep`.
 --- Window-only: processes keep running. This guarantees the kept session alone
 --- occupies the right side, and preserves the old zsh<->claude mutual exclusion
 --- from util.toggle_term. Remembers the most recently closed session for <C-s>.
 local function close_all_open_windows(keep)
+  local closed_any = false
   for _, term in ipairs(require('toggleterm.terminal').get_all()) do
     if term ~= keep and window_open(term) then
       term:close()
       local s = session_for_term(term)
       if s then last_closed = s end
+      closed_any = true
+    end
+  end
+  -- A session window went away (a terminal opened over it): the panel lives
+  -- below the session, so it goes too. show_session() reopens it right after.
+  if closed_any then panel_sync() end
+end
+
+--- Close everything else, open this session's window, and mark it current.
+--- Keeps the panel in sync. Focus: the panel's fresh open (a split below the
+--- tree) steals focus, so hand it back to the session window — except while
+--- the panel is stepping (j/k), where the panel keeps the cursor.
+local function show_session(s)
+  local stepping = panel.stepping
+  panel.switching = true -- hold the panel open through the window churn
+  -- While the panel is stepping, toggleterm's BufEnter handler must not see
+  -- the terminal: with persist_mode = false it schedules a startinsert on
+  -- every entry, and that call fires while the panel holds focus — flashing
+  -- INSERT on the global statusline (or landing on the nomodifiable panel)
+  -- before any stopinsert guard could react. Suppressing BufEnter for this
+  -- programmatic open keeps insert mode from ever being requested; when the
+  -- user opens a session for real (<C-s>/<CR>/<C-a>) events flow normally
+  -- and the terminal starts in insert as usual.
+  local saved_ei, saved_sii, cfg
+  if stepping then
+    -- toggleterm's BufEnter handler (persist_mode = false -> start_in_insert
+    -- = true) schedules `startinsert` on every programmatic terminal switch;
+    -- the scheduled call fires after this function returns, by which time the
+    -- panel has taken focus back, so insert lands on the panel and the
+    -- statusline flashes INSERT. eventignore can't stop an already-scheduled
+    -- callback, but it CAN stop the BufEnter autocmd from scheduling one — it
+    -- is honored while the autocmd fires, i.e. inside s.term:open() below.
+    saved_ei = vim.o.eventignore
+    vim.o.eventignore = 'BufEnter'
+    -- Disarm the synchronous spawn-time startinsert too
+    -- (setup_buffer_autocommands checks config.start_in_insert), for the
+    -- brand-new-terminal path of s.term:open().
+    local ok_cfg
+    ok_cfg, cfg = pcall(require, 'toggleterm.config')
+    if ok_cfg then
+      saved_sii = cfg.get('start_in_insert')
+      cfg.set({ start_in_insert = false })
+    end
+  end
+  close_all_open_windows(s.term)
+  s.term:open()
+  if saved_ei then vim.o.eventignore = saved_ei end
+  if saved_sii ~= nil and cfg then
+    cfg.set({ start_in_insert = saved_sii })
+  end
+  panel.switching = false
+  current = s
+  panel.open() -- refresh rows (open/closed states flipped)
+  if stepping then
+    -- Focus: the just-opened terminal keeps it for THIS event-loop pass. The
+    -- panel takes focus back one scheduled pass later (panel.step re-claims),
+    -- which is guaranteed to run AFTER any startinsert closures toggleterm
+    -- queued behind the BufEnter of this very switch — those fire while the
+    -- terminal still holds focus, where they are harmless. Focusing the panel
+    -- synchronously instead would let a queued startinsert fire on the panel
+    -- and flash INSERT on the statusline.
+  else
+    panel.follow() -- panel cursor follows the displayed session
+    local tw = s.term.window
+    if tw and vim.api.nvim_win_is_valid(tw) then
+      pcall(vim.api.nvim_set_current_win, tw)
     end
   end
 end
 
---- Close everything else, open this session's window, and mark it current.
-local function show_session(s)
-  close_all_open_windows(s.term)
-  s.term:open()
-  current = s
+-- Panel wiring (avoids a require cycle: panel.lua loads first, but its
+-- snapshot/show closures need the registry helpers defined above).
+--- The panel's rows: live sessions in list order as { busy, open }.
+panel.snapshot = function()
+  local snap = {}
+  for i, s in ipairs(sessions) do
+    snap[i] = { busy = session_busy(s), open = window_open(s.term) }
+  end
+  return snap
+end
+panel.show = function(i)
+  local s = sessions[i]
+  if s then show_session(s) end
 end
 
 --- Renumber the live sessions 1..N (in list order) so the display names never
@@ -261,6 +368,7 @@ local function on_session_exit(record)
     end
   end
   drop_record(record)
+  panel_sync() -- the exited session may have been the displayed one
 end
 
 -- --- Public API -------------------------------------------------------------
@@ -341,9 +449,13 @@ function M.close_current()
       -- session's.
       require('toggleterm.ui').hl_term(next_session.term)
       vim.cmd('startinsert')
+      panel.open()
+      panel.follow()
     else
       show_session(next_session)
     end
+  else
+    panel_sync() -- last session gone: drop the panel
   end
 end
 
@@ -371,6 +483,7 @@ function M.close_window()
     end
   end
   current = nil
+  panel_sync()
   return true
 end
 
@@ -395,6 +508,7 @@ function M.next_session()
     if window_open(s.term) then
       s.term:close()
       current = nil
+      panel_sync()
     else
       show_session(s)
     end
@@ -492,6 +606,8 @@ function M.setup(user_opts)
       end
     end,
   })
+
+  panel.setup()
 end
 
 return M
