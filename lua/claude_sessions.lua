@@ -343,14 +343,13 @@ panel.rename_session = function(i, name)
   if sessions[i] then M.rename(i, name) end
 end
 
---- Renumber the live sessions 1..N (in list order) so the display names never
---- grow past the number of currently open sessions: with three sessions the
---- statusline shows "claude #1..#3" no matter how many have been created and
---- closed before. Custom-named sessions (panel `r`) keep their name.
+--- Default session names. Every session is just `claude` — the panel's cursor
+--- and the window layout tell them apart. Custom-named sessions (panel `r`)
+--- keep their name through renumbers.
 local function renumber()
   for i, s in ipairs(sessions) do
     if not s.custom_name then
-      local name = 'claude #' .. i
+      local name = 'claude'
       s.name = name
       if s.term then
         s.term.display_name = name
@@ -551,7 +550,7 @@ function M.has_sessions()
 end
 
 --- Rename session `i` (1-based, panel row). An empty result restores the
---- default `claude #N` name and re-enables renumbering for it; a custom name
+--- default `claude` name and re-enables renumbering for it; a custom name
 --- survives later renumbers (creates/closes reshuffle the others around it).
 function M.rename(i, new_name)
   local s = sessions[i]

@@ -41,7 +41,7 @@ the same busy signal as the statusline dots). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the
 cursor (kills the process, same as terminal-mode `<C-d>`); `r` renames the
-session under the cursor (empty input restores the default `claude #N`, and a
+session under the cursor (empty input restores the default `claude`, and a
 custom name survives closing and creating sessions); `q` closes the
 panel without touching the sessions. The panel follows the nvim-tree window:
 it attaches when the tree opens (while a session is displayed), goes away when
@@ -79,7 +79,7 @@ in lualine:
 ```
 
 Session terminal buffers are tagged with `vim.b.claude_session_name`
-(e.g. `"claude #1"`) so statusline path components can show a friendly name
+(e.g. `"claude"`, or a custom name from the panel's `r`) so statusline path components can show a friendly name
 instead of the raw `term://` buffer name.
 
 ## Notes

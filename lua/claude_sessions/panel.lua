@@ -156,7 +156,7 @@ local function close_current_row()
 end
 
 -- <r>: rename the session under the cursor. An empty input restores the
--- default `claude #N` name; Esc cancels.
+-- default `claude` name; Esc cancels.
 local function rename_current_row()
   if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
   local row = vim.api.nvim_win_get_cursor(M.win)[1]
