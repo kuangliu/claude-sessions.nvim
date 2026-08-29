@@ -40,7 +40,9 @@ with its index, the agent name (`claude`) and busy state (`busy`/`idle`,
 the same busy signal as the statusline dots). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the
-cursor (kills the process, same as terminal-mode `<C-d>`); `q` closes the
+cursor (kills the process, same as terminal-mode `<C-d>`); `r` renames the
+session under the cursor (empty input restores the default `claude #N`, and a
+custom name survives closing and creating sessions); `q` closes the
 panel without touching the sessions. The panel follows the nvim-tree window:
 it attaches when the tree opens (while a session is displayed), goes away when
 the tree closes (`<Leader>f` toggle, `q` in the tree), and comes back when the

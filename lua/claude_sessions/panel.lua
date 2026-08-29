@@ -16,11 +16,15 @@ local M = {}
 
 -- Bound by the main module: `snapshot()` returns the live sessions as an
 -- array of { busy = bool, open = bool } (array index == session number),
--- `show(i)` displays session i, and `close_session(i)` kills session i.
+-- `show(i)` displays session i, `close_session(i)` kills session i,
+-- `row_name(i)` is the session's display name (rename prompt default), and
+-- `rename_session(i, name)` renames it.
 -- (Named close_session: M.close below tears the panel itself down.)
 M.snapshot = nil
 M.show = nil
 M.close_session = nil
+M.row_name = nil
+M.rename_session = nil
 
 -- True while the panel is driving a switch (stepping): show_session then
 -- skips its focus juggling so the cursor stays on the panel.
@@ -65,13 +69,13 @@ end
 
 -- Rewrite the rows and their highlights. Buffer line n is session n — no
 -- pseudo rows, so the cursor row IS the selection. The middle word is the
--- agent name, constant across rows: the open/closed split lives in the tree
--- of windows on the right, not in the list.
+-- agent name — `claude`, or the session's custom name once one is set with
+-- `r`; renamed rows drop their trailing highlight so the name reads plain.
 local function render(buf, snap)
   local lines = {}
   for i, s in ipairs(snap) do
     lines[i] = string.format(' %-' .. ID_PAD .. 's %-' .. STATE_PAD .. 's %s',
-      '#' .. i, 'claude', s.busy and 'busy' or 'idle')
+      '#' .. i, s.name or 'claude', s.busy and 'busy' or 'idle')
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
@@ -149,6 +153,18 @@ local function close_current_row()
   if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
   local row = vim.api.nvim_win_get_cursor(M.win)[1]
   M.close_session(row)
+end
+
+-- <r>: rename the session under the cursor. An empty input restores the
+-- default `claude #N` name; Esc cancels.
+local function rename_current_row()
+  if not (M.win and vim.api.nvim_win_is_valid(M.win)) then return end
+  local row = vim.api.nvim_win_get_cursor(M.win)[1]
+  local default = M.row_name and M.row_name(row) or ''
+  vim.ui.input({ prompt = 'Session name: ', default = default }, function(value)
+    if value == nil then return end -- cancelled
+    M.rename_session(row, value)
+  end)
 end
 
 -- Tear the panel down (window + buffer). Sessions keep running.
@@ -248,6 +264,14 @@ function M.open()
   M.buf, M.win = buf, win
   render(buf, snap)
 
+  -- Editing keys have no business here, and on a nomodifiable buffer nvim
+  -- refuses them with a noisy E21 (the reported error). Silence the common
+  -- ones FIRST so the functional maps below win; everything else keeps its
+  -- default.
+  for _, key in ipairs({ 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u', '<C-a>' }) do
+    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
+  end
+
   vim.keymap.set('n', 'q', function() M.close() end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close panel' })
   vim.keymap.set('n', '<CR>', open_current,
@@ -258,6 +282,8 @@ function M.open()
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open session' })
   vim.keymap.set('n', '<C-d>', close_current_row,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close session' })
+  vim.keymap.set('n', 'r', rename_current_row,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: rename session' })
   -- moving through the list switches sessions as it goes (debounced while held)
   vim.keymap.set('n', '<Down>', function() step(1) end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: next session' })
@@ -267,12 +293,6 @@ function M.open()
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: previous session' })
   vim.keymap.set('n', 'k', function() step(-1) end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: previous session' })
-  -- Editing keys have no business here, and on a nomodifiable buffer nvim
-  -- refuses them with a noisy E21 (the reported error). Silence the common
-  -- ones; everything else can keep its default.
-  for _, key in ipairs({ 'a', 'A', 'i', 'I', 'o', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'r', 'p', 'u', '<C-a>' }) do
-    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
-  end
 
   -- The window can also go away on its own (:close on the panel, tree-side
   -- layout edits); forget it so the next open() rebuilds cleanly.

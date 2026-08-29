@@ -207,21 +207,8 @@ local function find_session_index(record)
   end
 end
 
--- Panel wiring. panel.lua is required at the top, but its snapshot/show
--- closures need the registry helpers, and close_all_open_windows below needs
--- panel_sync — so all three are defined here, ahead of first use.
---- The panel's rows: live sessions in list order as { busy, open }.
-panel.snapshot = function()
-  local snap = {}
-  for i, s in ipairs(sessions) do
-    snap[i] = { busy = session_busy(s), open = window_open(s.term) }
-  end
-  return snap
-end
-panel.show = function(i)
-  local s = sessions[i]
-  if s then show_session(s) end
-end
+-- Panel wiring. panel.lua is required at the top; its snapshot/show closures
+-- are bound further down (after the registry helpers they close over).
 
 --- Push the registry/window state to the panel: re-render its rows, or close
 --- it when nothing is displayed anymore.
@@ -324,11 +311,16 @@ end
 
 -- Panel wiring (avoids a require cycle: panel.lua loads first, but its
 -- snapshot/show closures need the registry helpers defined above).
---- The panel's rows: live sessions in list order as { busy, open }.
+--- The panel's rows: live sessions in list order as { busy, open, name }.
 panel.snapshot = function()
   local snap = {}
   for i, s in ipairs(sessions) do
-    snap[i] = { busy = session_busy(s), open = window_open(s.term) }
+    snap[i] = {
+      busy = session_busy(s),
+      open = window_open(s.term),
+      -- the middle column shows `claude` until the session is renamed
+      name = s.custom_name and s.name or nil,
+    }
   end
   return snap
 end
@@ -342,19 +334,29 @@ panel.close_session = function(i)
   local s = sessions[i]
   if s then M.close_current(s, { stepping = true }) end
 end
+--- The panel's <r> rename prompt: default text and the apply callback.
+panel.row_name = function(i)
+  local s = sessions[i]
+  return s and s.name or ''
+end
+panel.rename_session = function(i, name)
+  if sessions[i] then M.rename(i, name) end
+end
 
 --- Renumber the live sessions 1..N (in list order) so the display names never
 --- grow past the number of currently open sessions: with three sessions the
 --- statusline shows "claude #1..#3" no matter how many have been created and
---- closed before.
+--- closed before. Custom-named sessions (panel `r`) keep their name.
 local function renumber()
   for i, s in ipairs(sessions) do
-    local name = 'claude #' .. i
-    s.name = name
-    if s.term then
-      s.term.display_name = name
-      if s.term.bufnr and vim.api.nvim_buf_is_valid(s.term.bufnr) then
-        vim.b[s.term.bufnr].claude_session_name = name
+    if not s.custom_name then
+      local name = 'claude #' .. i
+      s.name = name
+      if s.term then
+        s.term.display_name = name
+        if s.term.bufnr and vim.api.nvim_buf_is_valid(s.term.bufnr) then
+          vim.b[s.term.bufnr].claude_session_name = name
+        end
       end
     end
   end
@@ -546,6 +548,30 @@ end
 --- Is there at least one live session?
 function M.has_sessions()
   return #sessions > 0
+end
+
+--- Rename session `i` (1-based, panel row). An empty result restores the
+--- default `claude #N` name and re-enables renumbering for it; a custom name
+--- survives later renumbers (creates/closes reshuffle the others around it).
+function M.rename(i, new_name)
+  local s = sessions[i]
+  if not s then return end
+  new_name = vim.trim(new_name or '')
+  if new_name == '' then
+    s.custom_name = nil
+    renumber()
+  else
+    s.custom_name = true
+    s.name = new_name
+    if s.term then
+      s.term.display_name = new_name
+      if s.term.bufnr and vim.api.nvim_buf_is_valid(s.term.bufnr) then
+        vim.b[s.term.bufnr].claude_session_name = new_name
+      end
+    end
+  end
+  notify('Session renamed: ' .. s.name)
+  panel.refresh()
 end
 
 --- <C-s>: cycle sessions. With a single session, toggle its window
