@@ -40,7 +40,8 @@ a state symbol before the session name (`✓` idle, a spinning braille frame
 while busy) and the state word (`idle`/`busy`) indented on the line below —
 with a blue `ᐅ` marker in the
 gutter of the displayed session. States are colored like Claude Code's picker:
-red blocked, green idle, yellow working/busy (a custom name from `r` replaces
+red for `waiting` (shown as blocked — the agent is parked on a permission
+prompt), green idle, yellow working/busy (a custom name from `r` replaces
 the default). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the

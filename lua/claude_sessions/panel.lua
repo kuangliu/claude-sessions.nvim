@@ -169,12 +169,12 @@ end
 -- session name — `#N claude` by default, or the session's custom name once
 -- one is set with `r`.
 -- State styling: the word shown on the second line and the highlight group
--- for symbol + word, keyed by the snapshot's state. `busy` maps to the
--- working style (yellow, spinning); `blocked` rides the same spinner with
--- its own red style when a future CLI exposes it.
+-- for symbol + word, keyed by the CLI's status string. `busy` is working
+-- (yellow, spinning); `waiting` — an agent parked on a permission prompt —
+-- is blocked (red, spinning); anything unknown falls back to idle (green).
 local STATE_STYLE = {
   busy = { word = 'busy', hl = 'ClaudeSessionsPanelBusy' },
-  blocked = { word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
+  waiting = { word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
   idle = { word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
 }
 
