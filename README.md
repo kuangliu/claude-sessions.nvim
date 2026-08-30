@@ -36,8 +36,9 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 While a session window is displayed, a session-list panel is split below
 nvim-tree, styled after Claude Code's session picker: two lines per session —
-a state symbol (`✓` idle, `⋮` busy) before the session name, the state word
-(`idle`/`busy`) indented on the line below — with a blue `ᐅ` marker in the
+a state symbol before the session name (`✓` idle, a spinning braille frame
+while busy) and the state word (`idle`/`busy`) indented on the line below —
+with a blue `ᐅ` marker in the
 gutter of the displayed session (the same busy signal as the statusline dots,
 in matching colors; a custom name from `r` replaces the default). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the

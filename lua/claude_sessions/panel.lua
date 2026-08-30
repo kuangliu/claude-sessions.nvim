@@ -1,9 +1,9 @@
 -- The session-list panel split below nvim-tree, styled after Claude Code's
 -- session picker: TWO buffer lines per live claude session — a state symbol
--- (✓ idle, ⋮ busy) before the name, and the state word on the line below,
--- indented under the name. The displayed session's line carries a blue ᐅ in
--- the leading gutter; cursorline browsing; debounced stepping that switches
--- sessions live.
+-- (✓ idle, a spinning braille frame while busy) before the name, and the
+-- state word on the line below, indented under the name. The displayed
+-- session's line carries a blue ᐅ in the leading gutter; cursorline browsing;
+-- debounced stepping that switches sessions live.
 --
 -- Shown while a session window is displayed and an nvim-tree window exists to
 -- split below; closed when the last displayed session closes. The panel never
@@ -52,7 +52,7 @@ local arrow_row = nil
 
 -- Layout, Claude-Code session-picker style. Session n owns buffer lines
 -- 2n-1 (symbol + name) and 2n (state word, indented under the name):
---   ' ᐅ  ✓ #1 claude'
+--   ' ᐅ  ✓ claude'
 --   '     idle'
 -- The cursor sits on the SYMBOL line; ceil(line / 2) maps any line back to
 -- its session. Both gutter spellings are THREE display columns wide; ᐅ is
@@ -60,8 +60,7 @@ local arrow_row = nil
 -- marked row's later columns sit 2 bytes further out than the blank gutter's.
 local ARROW_GUTTER = ' ᐅ '
 local BLANK_GUTTER = '   '
-local SYM_BUSY = '⋮' -- agent working
-local SYM_IDLE = '✓' -- agent idle
+local SYM_IDLE = '✓' -- agent idle; busy sessions spin through SPIN_FRAMES
 local WORD_PAD = 5 -- state-word indent: gutter (3) + symbol (1) + space (1)
 
 --- First (symbol) buffer line of session `i`.
@@ -111,6 +110,41 @@ local function leave_insert()
   if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
 end
 
+-- Spinner. Busy sessions show a rotating braille frame instead of a static
+-- symbol; the timer below advances it one frame per SPIN_MS while the panel
+-- is open and something is busy — an idle panel pays nothing. The frames are
+-- all single display columns, so the layout never shifts between frames.
+local SPIN_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
+local SPIN_MS = 100
+local spin_phase = 1 -- index into SPIN_FRAMES
+local spin_timer ---@type uv.uv_timer_t?
+
+--- Start the spinner timer if it is not already running. Called from render
+--- when a session is busy; the tick itself stops the timer when nothing is
+--- busy anymore, so no stop bookkeeping is needed on the busy->idle edge.
+local function start_spinner()
+  if spin_timer then return end
+  spin_timer = (vim.uv or vim.loop).new_timer()
+  spin_timer:start(SPIN_MS, SPIN_MS, vim.schedule_wrap(function()
+    if not active() then
+      cancel_timer(spin_timer)
+      spin_timer = nil
+      return
+    end
+    local busy = false
+    local snap = M.snapshot and M.snapshot() or {}
+    for _, s in ipairs(snap) do busy = busy or s.busy end
+    if not busy then
+      cancel_timer(spin_timer)
+      spin_timer = nil
+      M.refresh() -- the last frame falls back to ✓
+      return
+    end
+    spin_phase = (spin_phase % #SPIN_FRAMES) + 1
+    M.refresh()
+  end))
+end
+
 --- One event-loop pass from now: leave insert and put focus back on the
 --- panel. Runs FIFO behind any startinsert closures toggleterm queued behind
 --- a programmatic switch — those fire while the just-opened terminal still
@@ -134,10 +168,12 @@ end
 -- one is set with `r`.
 local function render(buf, snap, pin_row)
   local lines = {}
+  local any_busy = false
   for i, s in ipairs(snap) do
     local marked = pin_row == i or (not pin_row and s.open)
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
-    local sym = s.busy and SYM_BUSY or SYM_IDLE
+    local sym = s.busy and SPIN_FRAMES[spin_phase] or SYM_IDLE
+    any_busy = any_busy or s.busy
     lines[entry_line(i)] = gutter .. sym .. ' ' .. (s.name or 'claude')
     lines[entry_line(i) + 1] = string.rep(' ', WORD_PAD) .. (s.busy and 'busy' or 'idle')
   end
@@ -165,6 +201,7 @@ local function render(buf, snap, pin_row)
       end_col = WORD_PAD + 4, hl_group = hl,
     })
   end
+  if any_busy then start_spinner() end
 end
 
 -- Display the session on row `row`. keep_focus keeps the cursor on the panel
@@ -241,6 +278,8 @@ end
 function M.close()
   cancel_timer(step_timer)
   step_timer = nil
+  cancel_timer(spin_timer)
+  spin_timer = nil
   arrow_row = nil
   if active() then
     pcall(vim.api.nvim_win_close, M.win, true)
