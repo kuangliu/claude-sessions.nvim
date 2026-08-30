@@ -139,20 +139,42 @@ function M.reclaim_focus()
   end)
 end
 
--- Rewrite the rows and their highlights. The ᐅ in the leading gutter marks a
--- session — the DISPLAYED one by default (the one the statusline dots mark
--- with •), or `pin_row` while a debounced step is in flight so the marker
--- moves with the cursor instead of trailing it. The name column shows the
--- session's custom name once one is set with `r`; the default is just
--- `claude` (the panel cursor and window layout tell sessions apart).
+--- Display width of a short panel string. Every rune the panel draws (gutter
+--- arrow, state symbols, spinner frames) is single-width, but NOT single-BYTE
+--- — `ᐅ`/`✓`/`◉` are 3 bytes — so padding and extmark columns need the rune
+--- count, not `#`. (`vim.fn.strdisplaywidth` would also do; this stays exact
+--- for the strings we render and never leaves Lua.)
+local function rune_len(str)
+  return vim.fn.strcharlen(str)
+end
+
+-- State styling: symbol, word shown on the second line, and the highlight
+-- group for symbol + word, keyed by the CLI's status string. `busy` is
+-- working (yellow, spinning braille); `waiting` — an agent parked on a
+-- permission prompt — is blocked (a static red ◉, like the picker's);
+-- anything unknown falls back to idle (green ✓).
+local STATE_STYLE = {
+  busy = { sym = nil, word = 'busy', hl = 'ClaudeSessionsPanelBusy', spin = true },
+  waiting = { sym = '◉', word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
+  idle = { sym = SYM_IDLE, word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
+}
+
+--- The style for a snapshot row's state (unknown strings fall back to idle).
+local function state_style(s)
+  return STATE_STYLE[s.state or (s.busy and 'busy' or 'idle')] or STATE_STYLE.idle
+end
+
+--- Resolved display state of one snapshot row: the STYLE (symbol/word/hl/
+--- spin) and whether the ᐅ marks this entry. `pin_row` (a debounced step in
+--- flight) overrides the displayed session as the marked entry.
+local function row_state(s, pin_row, i)
+  return state_style(s), pin_row == i or (not pin_row and s.open)
+end
 
 -- Spinner. The WORKING state's symbol is a rotating braille frame; the timer
 -- below advances it one frame per SPIN_MS while the panel is open and a
 -- spinning state is on the list — an idle panel pays nothing. The frames are
 -- all single display columns, so the layout never shifts between frames.
--- (STATE_STYLE below decides which states spin; forward-declared so the
--- tick closure captures the local, not a nil global.)
-local STATE_STYLE
 local SPIN_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local SPIN_MS = 100
 local spin_phase = 1 -- index into SPIN_FRAMES
@@ -175,8 +197,7 @@ local function start_spinner()
     local spinning = false
     local snap = M.snapshot and M.snapshot() or {}
     for _, s in ipairs(snap) do
-      local style = STATE_STYLE[s.state or (s.busy and 'busy' or 'idle')]
-      spinning = spinning or (style and style.spin or false)
+      spinning = spinning or state_style(s).spin or false
     end
     if not spinning then
       cancel_timer(spin_timer)
@@ -189,35 +210,12 @@ local function start_spinner()
   end))
 end
 
--- State styling: symbol, word shown on the second line, and the highlight
--- group for symbol + word, keyed by the CLI's status string. `busy` is
--- working (yellow, spinning braille); `waiting` — an agent parked on a
--- permission prompt — is blocked (a static red ◉, like the picker's);
--- anything unknown falls back to idle (green ✓).
-STATE_STYLE = {
-  busy = { sym = nil, word = 'busy', hl = 'ClaudeSessionsPanelBusy', spin = true },
-  waiting = { sym = '◉', word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
-  idle = { sym = SYM_IDLE, word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
-}
-
---- Display width of a short panel string. Every rune the panel draws (gutter
---- arrow, state symbols, spinner frames) is single-width, but NOT single-BYTE
---- — `ᐅ`/`✓`/`◉` are 3 bytes — so padding and extmark columns need the rune
---- count, not `#`. (`vim.fn.strdisplaywidth` would also do; this stays exact
---- for the strings we render and never leaves Lua.)
-local function rune_len(str)
-  return vim.fn.strcharlen(str)
-end
-
---- Resolved display state of one snapshot row: the STYLE (symbol/word/hl/
---- spin) and whether the ᐅ marks this entry. `pin_row` (a debounced step in
---- flight) overrides the displayed session as the marked entry.
-local function row_state(s, pin_row, i)
-  local state = s.state or (s.busy and 'busy' or 'idle')
-  local style = STATE_STYLE[state] or STATE_STYLE.idle
-  return style, pin_row == i or (not pin_row and s.open)
-end
-
+-- Rewrite the rows and their highlights. The ᐅ in the leading gutter marks a
+-- session — the DISPLAYED one by default, or `pin_row` while a debounced step
+-- is in flight so the marker moves with the cursor instead of trailing it.
+-- The name column shows the session's custom name once one is set with `r`;
+-- the default is just `claude` (the cursor and window layout tell sessions
+-- apart).
 local function render(buf, snap, pin_row)
   local lines = {}
   local any_spinning = false
@@ -228,18 +226,29 @@ local function render(buf, snap, pin_row)
   -- continuation misbehaves) — padded text needs no extension at all.
   -- Extmark columns stay BYTE offsets; the width/pad arithmetic is in columns.
   local width = active() and vim.api.nvim_win_get_width(M.win) or 80
+  -- One resolved view per entry, shared by the line pass and the mark pass:
+  -- the state style, whether the ᐅ marks it, and the symbol/gutter/name
+  -- segments both passes need.
+  local views = {}
   for i, s in ipairs(snap) do
     local style, marked = row_state(s, pin_row, i)
     -- nil sym = the working state's spinner frame
     local sym = style.sym or SPIN_FRAMES[spin_phase]
     any_spinning = any_spinning or style.spin
-    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
-    local name = s.name or 'claude'
+    views[i] = {
+      style = style,
+      marked = marked,
+      sym = sym,
+      gutter = marked and ARROW_GUTTER or BLANK_GUTTER,
+      name = s.name or 'claude',
+    }
+  end
+  for i, v in ipairs(views) do
     -- Columns, not bytes: the arrow gutter is 5 bytes / 4 columns.
     local pad = string.rep(' ',
-      math.max(width - GUTTER_COLS - rune_len(sym) - SYM_GAP - rune_len(name), 0))
-    lines[entry_line(i)] = gutter .. sym .. string.rep(' ', SYM_GAP) .. name .. pad
-    local word_line = string.rep(' ', WORD_PAD) .. style.word
+      math.max(width - GUTTER_COLS - rune_len(v.sym) - SYM_GAP - rune_len(v.name), 0))
+    lines[entry_line(i)] = v.gutter .. v.sym .. string.rep(' ', SYM_GAP) .. v.name .. pad
+    local word_line = string.rep(' ', WORD_PAD) .. v.style.word
     lines[entry_line(i) + 1] = word_line .. string.rep(' ', math.max(width - #word_line, 0))
     -- a blank separator line below every entry (a trailing one too: it never
     -- shows, and dropping it per-entry costs a modulo in a hot-ish loop)
@@ -249,15 +258,12 @@ local function render(buf, snap, pin_row)
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
-  for i, s in ipairs(snap) do
-    local style, marked = row_state(s, pin_row, i)
-    local sym = style.sym or SPIN_FRAMES[spin_phase]
-    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
+  for i, v in ipairs(views) do
     local lnum = entry_line(i) - 1 -- 0-based symbol line
     -- Byte offsets for the marks: gutter/symbol/name segments of the line.
-    local sym_col = #gutter
-    local name_col = sym_col + #sym + SYM_GAP
-    if marked then
+    local sym_col = #v.gutter
+    local name_col = sym_col + #v.sym + SYM_GAP
+    if v.marked then
       -- The selected entry highlights as ONE block: one full-width background
       -- mark per line (the lines themselves are padded to the window width).
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 0, {
@@ -275,15 +281,15 @@ local function render(buf, snap, pin_row)
     end
     -- the state symbol, in the state's color (ends before the 2-space gap)
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, sym_col, {
-      end_col = sym_col + #sym, hl_group = style.hl,
+      end_col = sym_col + #v.sym, hl_group = v.style.hl,
     })
     -- the session name, in bold
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, name_col, {
-      end_col = name_col + #(s.name or 'claude'), hl_group = 'ClaudeSessionsPanelName',
+      end_col = name_col + #v.name, hl_group = 'ClaudeSessionsPanelName',
     })
     -- the state word on the line below, in the same color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, WORD_PAD, {
-      end_col = WORD_PAD + #style.word, hl_group = style.hl,
+      end_col = WORD_PAD + #v.style.word, hl_group = v.style.hl,
     })
   end
   if any_spinning then start_spinner() end

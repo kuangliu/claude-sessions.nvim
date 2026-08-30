@@ -7,9 +7,10 @@
 -- botright vsplit + vertical resize path.
 --
 -- While a session window is displayed, a session-list panel is split below
--- nvim-tree (diffview's commit-panel style): one row per session with its
--- window and busy state; j/k steps through the list switching sessions live.
--- See claude_sessions/panel.lua.
+-- nvim-tree, styled after Claude Code's session picker: a state symbol and
+-- name per session (with the state word and a blank separator below it), the
+-- displayed session marked by an arrow and a block background; j/k steps
+-- through the list switching sessions live. See claude_sessions/panel.lua.
 --
 -- Keymaps:
 --   <C-a>  create a new session and open it on the right
@@ -203,25 +204,26 @@ local function window_open(term)
     and vim.api.nvim_win_get_buf(term.window) == term.bufnr
 end
 
+--- First live session matching `pred`, as (record, index); or nothing.
+local function find_session(pred)
+  for i, s in ipairs(sessions) do
+    if pred(s) then return s, i end
+  end
+end
+
 --- The session whose window is currently displayed, if any.
 local function displayed_session()
-  for _, s in ipairs(sessions) do
-    if window_open(s.term) then return s end
-  end
+  return find_session(function(s) return window_open(s.term) end)
 end
 
 --- Find the live session record for a toggleterm terminal, if any.
 local function session_for_term(term)
-  for _, s in ipairs(sessions) do
-    if s.term == term then return s end
-  end
+  return find_session(function(s) return s.term == term end)
 end
 
 --- Index of `record` in the sessions list, or nil.
 local function find_session_index(record)
-  for i, s in ipairs(sessions) do
-    if s == record then return i end
-  end
+  return select(2, find_session(function(s) return s == record end))
 end
 
 -- Defined in the Display section below; forward-declared so the panel hooks
@@ -446,7 +448,7 @@ function M.create()
   if record.term.bufnr and vim.api.nvim_buf_is_valid(record.term.bufnr) then
     vim.bo[record.term.bufnr].ft = 'claude'
   end
-  renumber() -- names the new session (and renumbers existing ones) 1..N
+  renumber() -- names the new session (custom names elsewhere are kept)
   start_poll_timer()
   notify('New session: ' .. record.name)
   -- When <C-a> fires from inside an existing terminal (t-mode mapping), nvim's
@@ -464,11 +466,11 @@ end
 --- default is the displayed one (or the most recently created when none is
 --- displayed). The split stays occupied: the session that followed the closed
 --- one (or the last remaining one, if the closed one was last) is shown in its
---- place. With `opts.stepping` (a panel-driven close) focus stays on the
+--- place. With `close_opts.stepping` (a panel-driven close) focus stays on the
 --- panel: the successor is still swapped into the split, but silently, and
 --- closing a background session leaves the display alone.
-function M.close_current(target, opts)
-  opts = opts or {}
+function M.close_current(target, close_opts)
+  close_opts = close_opts or {}
   if #sessions == 0 then
     notify('No claude sessions to close.', vim.log.levels.WARN)
     return
@@ -478,15 +480,14 @@ function M.close_current(target, opts)
   -- Position of the closed session, so its successor can be shown.
   local index = find_session_index(target)
   -- Panel-driven close: the list keeps focus and drives the display silently.
-  local stepping = opts.stepping or panel.stepping
+  local stepping = close_opts.stepping or panel.stepping
   -- Remember the window showing the target, so the split can be kept in place.
   local win = window_open(term) and term.window or nil
 
   -- Wiping the terminal buffer kills the claude job; the record is dropped
   -- below. close_on_exit = false keeps the job's later exit from closing the
   -- window / moving focus. Deleting the LAST buffer of its window also tears
-  -- the window down, so `win` may be invalid afterwards — the branches below
-  -- re-check.
+  -- the window down, so `win` may be invalid afterwards — re-checked below.
   if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
@@ -499,10 +500,13 @@ function M.close_current(target, opts)
   end
   local next_session = sessions[index] or sessions[#sessions]
 
+  -- The closed session's window survived the buffer wipe: keep the same split
+  -- and swap the successor's buffer in (no window close/reopen, so the
+  -- statusline and bufferline get a single clean update instead of
+  -- flickering). Panel-driven: the cursor stays on the panel where the user
+  -- closed (rows shifted, refresh clamps it); the terminal takes insert mode
+  -- when the user next enters it.
   if win and vim.api.nvim_win_is_valid(win) then
-    -- Keep the same split: swap the next session's buffer into this window
-    -- in place (no window close/reopen, so the statusline and bufferline get
-    -- a single clean update instead of flickering).
     close_all_open_windows(next_session.term)
     vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
     next_session.term.window = win
@@ -516,27 +520,29 @@ function M.close_current(target, opts)
       vim.cmd('startinsert')
       panel.follow()
     end
-    -- Panel-driven: the successor is displayed, but the cursor stays on the
-    -- panel where the user closed (rows shifted, refresh clamps it). The
-    -- terminal takes insert mode when the user next enters it.
-  elseif not stepping then
+    return
+  end
+
+  -- The closed session's window went away with its buffer.
+  if not stepping then
     show_session(next_session)
-  elseif window_open(next_session.term) then
+    return
+  end
+  if window_open(next_session.term) then
     -- Background close: nothing on screen was showing the closed session, so
     -- only the rows shrink.
     panel.refresh()
-  else
-    -- The displayed session's window went away with its buffer: show the
-    -- successor through the normal path — panel.stepping keeps show_session
-    -- from letting toggleterm request insert mode. No panel.step is driving
-    -- this close, so re-claim the panel one scheduled pass later — FIFO
-    -- behind any startinsert closures toggleterm queued, which fire
-    -- harmlessly on the terminal.
-    panel.stepping = stepping
-    show_session(next_session)
-    panel.stepping = false
-    panel.reclaim_focus()
+    return
   end
+  -- The DISPLAYED session was closed (panel-driven): show the successor
+  -- through the normal path — panel.stepping keeps show_session from letting
+  -- toggleterm request insert mode. No panel.step is driving this close, so
+  -- re-claim the panel one scheduled pass later — FIFO behind any startinsert
+  -- closures toggleterm queued, which fire harmlessly on the terminal.
+  panel.stepping = stepping
+  show_session(next_session)
+  panel.stepping = false
+  panel.reclaim_focus()
 end
 
 --- Is any claude session window currently displayed in the UI?
@@ -552,13 +558,15 @@ end
 --- can bring it back, and current is cleared. Returns true if any window was
 --- closed.
 function M.close_window()
-  if not displayed_session() then return false end
+  local closed = false
   for _, s in ipairs(sessions) do
     if window_open(s.term) then
       s.term:close()
       last_closed = s
+      closed = true
     end
   end
+  if not closed then return false end
   current = nil
   panel_sync()
   return true
@@ -610,16 +618,14 @@ function M.next_session()
     return
   end
 
-  local displayed = displayed_session()
-  local target
-  if displayed then
-    local i = find_session_index(displayed)
-    target = sessions[i % #sessions + 1] -- next, wrapping around
-  elseif last_closed and session_for_term(last_closed.term) then
-    target = last_closed -- nothing displayed: bring back the last closed one
-  else
-    target = sessions[#sessions] -- most recent session
-  end
+  -- Pick the target: the session after the displayed one (wrapping), or —
+  -- nothing displayed — the last closed one, else the most recent. last_closed
+  -- is only ever set to live records (drop_record clears it), so it needs no
+  -- liveness check.
+  local displayed, displayed_index = displayed_session()
+  local target = displayed and sessions[displayed_index % #sessions + 1]
+    or last_closed
+    or sessions[#sessions]
 
   if window_open(target.term) then
     -- Close any other open toggleterm window (e.g. a zsh terminal) so the
