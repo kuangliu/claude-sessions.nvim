@@ -2,8 +2,9 @@
 -- session picker: TWO buffer lines per live claude session — a state symbol
 -- (✓ idle, a spinning braille frame while busy) before the name, and the
 -- state word on the line below, indented under the name. The displayed
--- session's line carries a blue ᐅ in the leading gutter; cursorline browsing;
--- debounced stepping that switches sessions live.
+-- session's entry carries a blue ᐅ in the leading gutter and a two-line block
+-- background that the panel cursor rests on; stepping switches sessions live
+-- (debounced while held).
 --
 -- Shown while a session window is displayed and an nvim-tree window exists to
 -- split below; closed when the last displayed session closes. The panel never
@@ -51,26 +52,32 @@ local step_timer ---@type uv.uv_timer_t?
 local arrow_row = nil
 
 -- Layout, Claude-Code session-picker style. Session n owns buffer lines
--- 2n-1 (symbol + name) and 2n (state word, indented under the name):
---   ' ᐅ  ✓ claude'
---   '     idle'
--- The cursor sits on the SYMBOL line; ceil(line / 2) maps any line back to
--- its session. Both gutter spellings are THREE display columns wide; ᐅ is
--- 3 bytes / 1 display column — and extmark columns are BYTE offsets — so the
--- marked row's later columns sit 2 bytes further out than the blank gutter's.
-local ARROW_GUTTER = ' ᐅ '
-local BLANK_GUTTER = '   '
+-- 3n-2 (symbol + name) and 3n-1 (state word, indented under the name), with a
+-- blank separator line at 3n between entries:
+--   ' ᐅ  ✓  claude'
+--   '       idle'
+--   ''
+-- The cursor sits on the SYMBOL line; floor((line + 2) / 3) maps any line
+-- (a separator attributes to the entry above it) back to its session. Both
+-- gutter spellings are FOUR display columns wide (ᐅ is 3 bytes / 1 display
+-- column — and extmark columns are BYTE offsets — so the marked row's later
+-- columns sit 2 bytes further out than the blank gutter's).
+local ARROW_GUTTER = ' ᐅ  '
+local BLANK_GUTTER = '    '
+local GUTTER_COLS = 4 -- display width of EITHER gutter spelling (ᐅ is 3 bytes)
+local SYM_GAP = 2 -- spaces between the state symbol and the name
 local SYM_IDLE = '✓' -- agent idle; busy sessions spin through SPIN_FRAMES
-local WORD_PAD = 5 -- state-word indent: gutter (3) + symbol (1) + space (1)
+local WORD_PAD = 7 -- state-word indent: gutter (4) + symbol (1) + gap (2)
 
 --- First (symbol) buffer line of session `i`.
 local function entry_line(i)
-  return 2 * i - 1
+  return 3 * i - 2
 end
 
---- Session index for buffer line `line` (either line of an entry).
+--- Session index for buffer line `line` (either line of an entry, or the
+--- separator line below it).
 local function line_entry(line)
-  return math.ceil(line / 2)
+  return math.floor((line + 2) / 3)
 end
 
 local function define_highlights()
@@ -81,6 +88,11 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#e5c07b' }) -- working: yellow
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#98c379' }) -- idle: green
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBlocked', { fg = '#e06c75' }) -- blocked: red
+  -- Session names, bold like the picker's.
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelName', { bold = true })
+  -- The selected entry's two-line block background: a faint read on top of
+  -- the normal background, so the state colors stay legible.
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelCursor', { bg = '#2c313c' })
 end
 
 -- The window currently showing nvim-tree's buffer, or nil.
@@ -188,9 +200,25 @@ STATE_STYLE = {
   idle = { sym = SYM_IDLE, word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
 }
 
+--- Display width of a short panel string. Every rune the panel draws (gutter
+--- arrow, state symbols, spinner frames) is single-width, but NOT single-BYTE
+--- — `ᐅ`/`✓`/`◉` are 3 bytes — so padding and extmark columns need the rune
+--- count, not `#`. (`vim.fn.strdisplaywidth` would also do; this stays exact
+--- for the strings we render and never leaves Lua.)
+local function rune_len(str)
+  return vim.fn.strcharlen(str)
+end
+
 local function render(buf, snap, pin_row)
   local lines = {}
   local any_spinning = false
+  -- Both lines of every entry are padded to the panel window's DISPLAY width,
+  -- so the selected entry's block background is two PLAIN single-line extmarks
+  -- running the full row. No hl_eol: its semantics proved unreliable across
+  -- nvim builds (a mark's final line is clipped to end_col and the EOL
+  -- continuation misbehaves) — padded text needs no extension at all.
+  -- Extmark columns stay BYTE offsets; the width/pad arithmetic is in columns.
+  local width = active() and vim.api.nvim_win_get_width(M.win) or 80
   for i, s in ipairs(snap) do
     local marked = pin_row == i or (not pin_row and s.open)
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
@@ -199,8 +227,17 @@ local function render(buf, snap, pin_row)
     -- nil sym = the working state's spinner frame
     local sym = style.sym or SPIN_FRAMES[spin_phase]
     any_spinning = any_spinning or style.spin
-    lines[entry_line(i)] = gutter .. sym .. ' ' .. (s.name or 'claude')
-    lines[entry_line(i) + 1] = string.rep(' ', WORD_PAD) .. style.word
+    local name = s.name or 'claude'
+    local name_cols = rune_len(name)
+    -- Columns, not bytes: the arrow gutter is 5 bytes / 4 columns.
+    local name_pad = string.rep(' ',
+      math.max(width - GUTTER_COLS - rune_len(sym) - SYM_GAP - name_cols, 0))
+    lines[entry_line(i)] = gutter .. sym .. string.rep(' ', SYM_GAP) .. name .. name_pad
+    local word_line = string.rep(' ', WORD_PAD) .. style.word
+    lines[entry_line(i) + 1] = word_line .. string.rep(' ', math.max(width - #word_line, 0))
+    -- a blank separator line below every entry (a trailing one too: it never
+    -- shows, and dropping it per-entry costs a modulo in a hot-ish loop)
+    lines[entry_line(i) + 2] = ''
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
@@ -213,15 +250,33 @@ local function render(buf, snap, pin_row)
     local state = s.state or (s.busy and 'busy' or 'idle')
     local style = STATE_STYLE[state] or STATE_STYLE.idle
     local sym = style.sym or SPIN_FRAMES[spin_phase]
+    -- Byte offsets for the marks: gutter/symbol/name segments of the line.
+    local sym_col = #gutter
+    local name_col = sym_col + #sym + SYM_GAP
+    local name_end = name_col + #(s.name or 'claude')
+    local row_bytes = #(lines[entry_line(i)])
     if marked then
+      -- The selected entry highlights as ONE block: one full-width background
+      -- mark per line (the lines themselves are padded to the window width).
+      vim.api.nvim_buf_set_extmark(buf, ns, lnum, 0, {
+        end_row = lnum, end_col = row_bytes, hl_group = 'ClaudeSessionsPanelCursor',
+      })
+      vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, 0, {
+        end_row = lnum + 1, end_col = #(lines[entry_line(i) + 1]),
+        hl_group = 'ClaudeSessionsPanelCursor',
+      })
       -- the arrow, in the commit panel's hash accent
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
         end_col = 4, hl_group = 'ClaudeSessionsPanelArrow',
       })
     end
-    -- the state symbol, in the state's color
-    vim.api.nvim_buf_set_extmark(buf, ns, lnum, #gutter, {
-      end_col = #gutter + #sym, hl_group = style.hl,
+    -- the state symbol, in the state's color (ends before the 2-space gap)
+    vim.api.nvim_buf_set_extmark(buf, ns, lnum, sym_col, {
+      end_col = sym_col + #sym, hl_group = style.hl,
+    })
+    -- the session name, in bold
+    vim.api.nvim_buf_set_extmark(buf, ns, lnum, name_col, {
+      end_col = name_end, hl_group = 'ClaudeSessionsPanelName',
     })
     -- the state word on the line below, in the same color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, WORD_PAD, {
@@ -229,6 +284,20 @@ local function render(buf, snap, pin_row)
     })
   end
   if any_spinning then start_spinner() end
+end
+
+--- Rest the panel cursor on the displayed session's symbol line — the entry
+--- the block background is drawn on — so the raw editor cursor never sits
+--- beside an unhighlighted entry (a stray block on the left edge). Stepping
+--- holds the cursor where the user put it until the switch settles.
+local function rest_cursor(snap)
+  if arrow_row then return end
+  for i, s in ipairs(snap) do
+    if s.open then
+      pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(i), 0 })
+      return
+    end
+  end
 end
 
 -- Display the session on row `row`. keep_focus keeps the cursor on the panel
@@ -331,9 +400,13 @@ function M.refresh()
   local line = vim.api.nvim_win_get_cursor(M.win)[1]
   render(M.buf, snap, arrow_row)
   -- Keep the cursor on a SYMBOL line: clamp to the list, then snap back to
-  -- the same entry's symbol line (a raw clamp can land on a state-word line).
-  line = math.min(math.max(line, 1), 2 * #snap)
+  -- the same entry's symbol line (a raw clamp can land on a state-word or
+  -- separator line).
+  line = math.min(math.max(line, 1), 3 * #snap - 1)
   pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(line_entry(line)), 0 })
+  -- No step in flight: rest the cursor on the displayed session's entry so it
+  -- never sits beside an unhighlighted row (the stray block on the left).
+  rest_cursor(snap)
 end
 
 -- Registry changed: refresh the rows, or close the panel when no session
@@ -424,11 +497,19 @@ function M.open()
   vim.cmd('below ' .. height .. 'split')
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
+  -- The split below the tree inherits the tree window's options; the panel is
+  -- plain text — nothing should decorate its edges (a fold/sign/status column
+  -- would draw grey blocks beside the rows).
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = 'no'
+  vim.wo[win].foldcolumn = '0'
+  vim.wo[win].cursorcolumn = false
+  vim.wo[win].statuscolumn = ''
   vim.wo[win].wrap = false
-  vim.wo[win].cursorline = true
+  -- No cursorline: the selected entry is highlighted as a two-line block by
+  -- render() instead (see the Cursor extmark there).
+  vim.wo[win].cursorline = false
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
 
   M.buf, M.win = buf, win

@@ -35,14 +35,16 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 ## Session panel
 
 While a session window is displayed, a session-list panel is split below
-nvim-tree, styled after Claude Code's session picker: two lines per session —
-a state symbol before the session name (`✓` idle, a spinning braille frame
-while busy, a red `◉` while blocked) and the state word (`idle`/`busy`/`blocked`) indented on the line below —
-with a blue `ᐅ` marker in the
-gutter of the displayed session. States are colored like Claude Code's picker:
-red for `waiting` (shown as blocked — the agent is parked on a permission
-prompt), green idle, yellow working/busy (a custom name from `r` replaces
-the default). `j/k` (or `<Down>/<Up>`) move
+nvim-tree, styled after Claude Code's session picker: two lines per session
+separated by a blank line — a state symbol before the session name (`✓` idle,
+a spinning braille frame while busy, a red `◉` while blocked) and the state
+word (`idle`/`busy`/`blocked`) indented under the name — with a blue `ᐅ`
+marker in the gutter of the displayed session, whose two-line entry also
+carries a full-width block background. States are colored like Claude Code's
+picker: red for `waiting` (shown as blocked — the agent is parked on a
+permission prompt), green idle, yellow working/busy (a custom name from `r`
+replaces the default, shown bold like the picker's). `j/k` (or
+`<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the
 cursor (kills the process, same as terminal-mode `<C-d>` or `dd`); `r` renames the
