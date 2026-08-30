@@ -39,8 +39,9 @@ nvim-tree, styled after Claude Code's session picker: two lines per session —
 a state symbol before the session name (`✓` idle, a spinning braille frame
 while busy) and the state word (`idle`/`busy`) indented on the line below —
 with a blue `ᐅ` marker in the
-gutter of the displayed session (the same busy signal as the statusline dots,
-in matching colors; a custom name from `r` replaces the default). `j/k` (or `<Down>/<Up>`) move
+gutter of the displayed session. States are colored like Claude Code's picker:
+red blocked, green idle, yellow working/busy (a custom name from `r` replaces
+the default). `j/k` (or `<Down>/<Up>`) move
 through the list and switch sessions live as they go; `<CR>`/`l`/`o` open the
 session under the cursor and focus it; `<C-d>` closes the session under the
 cursor (kills the process, same as terminal-mode `<C-d>` or `dd`); `r` renames the

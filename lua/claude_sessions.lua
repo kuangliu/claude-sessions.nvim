@@ -58,7 +58,7 @@ end
 -- buffers the agent changed on disk. Everything is gated on `any_busy` (or on
 -- busy<->idle transitions), so an idle editor pays nothing, and the timer
 -- stops entirely once the last session closes.
-local busy_by_pid = {} -- map<number pid, boolean>
+local busy_by_pid = {} -- map<number pid, string status ('busy'/'idle'/...)
 local any_busy = false -- is any live session's agent busy right now?
 local blink_on = true -- toggled once per statusline render; busy dots alternate
 local poll_timer = nil
@@ -78,11 +78,18 @@ local function session_pid(s)
   return nil
 end
 
---- Is this session's agent currently busy? False when the pid is unknown or
---- not yet in the cache.
-local function session_busy(s)
+--- This session's agent state as reported by `claude agents --json` —
+--- 'busy', 'idle', or anything else the CLI grows (e.g. a blocked state);
+--- nil when the pid is unknown or not yet in the cache.
+local function session_state(s)
   local pid = session_pid(s)
-  return pid ~= nil and busy_by_pid[pid] == true
+  if pid == nil then return nil end
+  return busy_by_pid[pid]
+end
+
+--- Is this session's agent currently busy? False when the state is unknown.
+local function session_busy(s)
+  return session_state(s) == 'busy'
 end
 
 --- Recompute `any_busy` from the fresh pid cache. On a busy<->idle transition
@@ -126,8 +133,8 @@ local function refresh_busy_state()
       if not ok or type(agents) ~= 'table' then return end
       local next_map = {}
       for _, a in ipairs(agents) do
-        if type(a) == 'table' and a.pid then
-          next_map[a.pid] = (a.status == 'busy')
+        if type(a) == 'table' and a.pid and type(a.status) == 'string' then
+          next_map[a.pid] = a.status
         end
       end
       busy_by_pid = next_map
@@ -262,12 +269,14 @@ local function panel_sync()
   panel.sync(M.is_visible())
 end
 
---- The panel's rows: live sessions in list order as { busy, open, name }.
+--- The panel's rows: live sessions in list order as { busy, state, open, name }.
 panel.snapshot = function()
   local snap = {}
   for i, s in ipairs(sessions) do
     snap[i] = {
       busy = session_busy(s),
+      -- the CLI's own status string ('busy'/'idle'/...), for the panel's word
+      state = session_state(s),
       open = window_open(s.term),
       -- the middle column shows `claude` until the session is renamed
       name = s.custom_name and s.name or nil,

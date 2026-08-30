@@ -74,11 +74,13 @@ local function line_entry(line)
 end
 
 local function define_highlights()
-  -- Same accent blue as diffview's commit hashes for the arrow; onedark's
-  -- green and comment grey for the busy / idle symbol and word.
+  -- Same accent blue as diffview's commit hashes for the arrow. The state
+  -- colors follow Claude Code's picker: red blocked, green idle, yellow
+  -- working/busy.
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelArrow', { fg = '#61afef' })
-  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#98c379' })
-  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#5c6370' })
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#e5c07b' }) -- working: yellow
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#98c379' }) -- idle: green
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBlocked', { fg = '#e06c75' }) -- blocked: red
 end
 
 -- The window currently showing nvim-tree's buffer, or nil.
@@ -166,16 +168,28 @@ end
 -- moves with the cursor instead of trailing it. The name column shows the
 -- session name — `#N claude` by default, or the session's custom name once
 -- one is set with `r`.
+-- State styling: the word shown on the second line and the highlight group
+-- for symbol + word, keyed by the snapshot's state. `busy` maps to the
+-- working style (yellow, spinning); `blocked` rides the same spinner with
+-- its own red style when a future CLI exposes it.
+local STATE_STYLE = {
+  busy = { word = 'busy', hl = 'ClaudeSessionsPanelBusy' },
+  blocked = { word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
+  idle = { word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
+}
+
 local function render(buf, snap, pin_row)
   local lines = {}
   local any_busy = false
   for i, s in ipairs(snap) do
     local marked = pin_row == i or (not pin_row and s.open)
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
-    local sym = s.busy and SPIN_FRAMES[spin_phase] or SYM_IDLE
-    any_busy = any_busy or s.busy
+    local state = s.state or (s.busy and 'busy' or 'idle')
+    local style = STATE_STYLE[state] or STATE_STYLE.idle
+    local sym = state ~= 'idle' and SPIN_FRAMES[spin_phase] or SYM_IDLE
+    any_busy = any_busy or state ~= 'idle'
     lines[entry_line(i)] = gutter .. sym .. ' ' .. (s.name or 'claude')
-    lines[entry_line(i) + 1] = string.rep(' ', WORD_PAD) .. (s.busy and 'busy' or 'idle')
+    lines[entry_line(i) + 1] = string.rep(' ', WORD_PAD) .. style.word
   end
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
@@ -185,7 +199,8 @@ local function render(buf, snap, pin_row)
     local marked = pin_row == i or (not pin_row and s.open)
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
     local lnum = entry_line(i) - 1 -- 0-based symbol line
-    local hl = s.busy and 'ClaudeSessionsPanelBusy' or 'ClaudeSessionsPanelIdle'
+    local state = s.state or (s.busy and 'busy' or 'idle')
+    local style = STATE_STYLE[state] or STATE_STYLE.idle
     if marked then
       -- the arrow, in the commit panel's hash accent
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
@@ -194,11 +209,11 @@ local function render(buf, snap, pin_row)
     end
     -- the state symbol, in the state's color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, #gutter, {
-      end_col = #gutter + #SYM_IDLE, hl_group = hl,
+      end_col = #gutter + #SYM_IDLE, hl_group = style.hl,
     })
     -- the state word on the line below, in the same color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, WORD_PAD, {
-      end_col = WORD_PAD + 4, hl_group = hl,
+      end_col = WORD_PAD + #style.word, hl_group = style.hl,
     })
   end
   if any_busy then start_spinner() end
