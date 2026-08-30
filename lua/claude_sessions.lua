@@ -299,12 +299,6 @@ panel.close_session = function(i)
   if s then M.close_current(s, { stepping = true }) end
 end
 
---- The panel's <r> rename prompt: default text and the apply callback.
-panel.row_name = function(i)
-  local s = sessions[i]
-  return s and s.name or ''
-end
-
 panel.rename_session = function(i, name)
   if sessions[i] then M.rename(i, name) end
 end

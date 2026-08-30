@@ -20,13 +20,11 @@ local M = {}
 -- Bound by the main module: `snapshot()` returns the live sessions as an
 -- array of { busy = bool, open = bool, name = string? } (array index ==
 -- session number), `show(i)` displays session i, `close_session(i)` kills
--- session i, `row_name(i)` is the session's display name (rename prompt
--- default), and `rename_session(i, name)` renames it.
+-- session i, and `rename_session(i, name)` renames it.
 -- (Named close_session: M.close below tears the panel itself down.)
 M.snapshot = nil
 M.show = nil
 M.close_session = nil
-M.row_name = nil
 M.rename_session = nil
 
 -- True while the panel is driving a switch (stepping): show_session then
@@ -50,6 +48,14 @@ local step_timer ---@type uv.uv_timer_t?
 -- ~120ms. Nil whenever no step is pending — the marker then falls back to the
 -- row of the displayed session.
 local arrow_row = nil
+
+-- In-place rename state, set while a session name is being edited directly on
+-- its row (the `r` flow): the panel buffer is unlocked and insert mode is
+-- WANTED there, so the mode guard stands down until the edit ends — Enter
+-- applies the name, leaving insert any other way (Esc, a click elsewhere)
+-- cancels it. Carries the edited row: its 0-based symbol line and the byte
+-- offset of the name in that line (the backspace floor).
+local renaming = nil
 
 -- Layout, Claude-Code session-picker style. Session n owns buffer lines
 -- 3n-2 (symbol + name) and 3n-1 (state word, indented under the name), with a
@@ -374,20 +380,76 @@ local function close_current_row()
   if row then M.close_session(row) end
 end
 
--- <r>: rename the session under the cursor. An empty input restores the
--- default `claude` name; Esc cancels.
+--- End the in-place rename. `apply` commits the row's current text as the new
+--- name (empty restores the default `claude`); otherwise the edit is
+--- discarded. Either way: leave insert, remove the backspace floor mapping,
+--- re-arm the mode guard, re-lock the buffer, and re-render the rows (which
+--- also repairs anything else the edit touched).
+local function finish_rename(apply)
+  if not renaming then return end
+  local r = renaming
+  renaming = nil
+  pcall(vim.cmd, 'stopinsert') -- the <CR>/<Esc> mappings replace the builtin leave
+  pcall(vim.keymap.del, 'i', '<BS>', { buffer = M.buf })
+  pcall(vim.keymap.del, 'i', '<C-w>', { buffer = M.buf })
+  local value
+  if apply and M.buf and vim.api.nvim_buf_is_valid(M.buf) then
+    local line = vim.api.nvim_buf_get_lines(M.buf, r.lnum, r.lnum + 1, false)[1] or ''
+    value = vim.trim(line:sub(r.name_col))
+  end
+  if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
+    vim.bo[M.buf].modifiable = false
+  end
+  if value then
+    M.rename_session(r.row, value) -- refreshes the rows with the new name
+  else
+    M.refresh() -- repaint: discards the edit / restores the old name
+  end
+end
+
+-- <r>: rename the session under the cursor, in place on its row — no cmdline
+-- prompt. The buffer is unlocked, insert mode starts with the cursor after
+-- the name's last char, Enter applies the new name, Esc (or leaving insert
+-- any other way) cancels and restores the row.
 local function rename_current_row()
   local row = cursor_row()
-  if not row then return end
-  local default = M.row_name and M.row_name(row) or ''
-  vim.ui.input({ prompt = 'Session name: ', default = default }, function(value)
-    if value == nil then return end -- cancelled
-    M.rename_session(row, value)
-  end)
+  if not row or renaming then return end
+  local snap = M.snapshot and M.snapshot() or {}
+  local s = snap[row]
+  if not s then return end
+  local name = s.name or 'claude'
+  local lnum = entry_line(row) - 1 -- 0-based symbol line
+  -- The name starts after the gutter, the state symbol and the gap. The
+  -- symbol can be a 3-byte spinner frame mid-animation, so the name's byte
+  -- offset is read off the row: find the name text after the leading
+  -- gutter..symbol..gap prefix.
+  local line = vim.api.nvim_buf_get_lines(M.buf, lnum, lnum + 1, false)[1] or ''
+  local name_col = line:find(name, 1, true)
+  if not name_col then return end -- row not in the expected shape; bail out
+  renaming = { row = row, lnum = lnum, name_col = name_col }
+  -- A backspace floor at the name start: insert-mode <BS>/<C-w> refuse to
+  -- delete left of it, so the gutter, the state symbol and the gap the name
+  -- sits on survive any edit. (A plain 'backspace' option can express "stop
+  -- at insert start" only globally — the floor is per-edit, hence a mapping.)
+  local function backspace_floor()
+    if vim.fn.col('.') <= name_col then return '' end
+    return '<BS>'
+  end
+  vim.keymap.set('i', '<BS>', backspace_floor,
+    { buffer = M.buf, expr = true, replace_keycodes = true, desc = 'claude sessions: rename floor' })
+  vim.keymap.set('i', '<C-w>', backspace_floor,
+    { buffer = M.buf, expr = true, replace_keycodes = true, desc = 'claude sessions: rename floor' })
+  vim.bo[M.buf].modifiable = true
+  -- byte col just past the name's last char = where insert mode starts typing
+  vim.fn.cursor(lnum + 1, name_col + #name)
+  vim.cmd('startinsert')
 end
 
 -- Tear the panel down (window + buffer). Sessions keep running.
 function M.close()
+  -- A rename edit dies with the panel: drop the state so the mode guard is
+  -- re-armed (the buffer delete takes the floor mappings with it).
+  renaming = nil
   cancel_timer(step_timer)
   step_timer = nil
   cancel_timer(spin_timer)
@@ -408,6 +470,10 @@ function M.refresh()
   if not (active() and M.buf and vim.api.nvim_buf_is_valid(M.buf)) then
     return
   end
+  -- An in-place rename has unlocked text on the rows; a repaint here (a
+  -- spinner frame, a busy-state flip) would clobber the edit mid-keystroke.
+  -- finish_rename repaints after the edit ends.
+  if renaming then return end
   local snap = M.snapshot and M.snapshot() or {}
   if #snap == 0 then
     M.close()
@@ -454,6 +520,8 @@ local function make_panel_buffer()
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].buflisted = false
   vim.bo[buf].swapfile = false
+  -- No completion popups while typing a rename (blink.cmp reads this var).
+  vim.b[buf].completion = false
   return buf
 end
 
@@ -471,13 +539,17 @@ local function set_keymaps(buf)
     vim.keymap.set('n', key, fn,
       { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
   end
+  -- Insert mode (in-place rename): Enter applies the edit instead of splitting
+  -- the row; Esc leaves insert and the InsertLeave hook cancels the edit.
+  vim.keymap.set('i', '<CR>', function() finish_rename(true) end,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: apply rename' })
+  vim.keymap.set('i', '<Esc>', function() finish_rename(false) end,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: cancel rename' })
   map('q', function() M.close() end, 'close panel')
   map('<CR>', open_current, 'open session')
   map('l', open_current, 'open session')
   map('o', open_current, 'open session')
   map('<C-d>', close_current_row, 'close session')
-  -- the vim-ish spelling of the same close: dd, like deleting a line
-  map('dd', close_current_row, 'close session')
   map('r', rename_current_row, 'rename session')
   -- moving through the list switches sessions as it goes (debounced while held)
   map('<Down>', function() step(1) end, 'next session')
@@ -565,7 +637,9 @@ local function install_mode_guard()
   ---@diagnostic disable-next-line: duplicate-set-field
   vim.cmd = setmetatable({}, {
     __call = function(_, cmd, ...)
-      if is_startinsert(cmd) and vim.bo.filetype == 'claude-sessions-panel' then
+      -- An in-place rename WANTS insert on the panel: let its startinsert
+      -- (and everyone else's, for the duration) through.
+      if is_startinsert(cmd) and vim.bo.filetype == 'claude-sessions-panel' and not renaming then
         return
       end
       return orig_cmd(cmd, ...)
@@ -573,7 +647,7 @@ local function install_mode_guard()
     __index = function(_, k)
       if k == 'startinsert' then
         return function(...)
-          if vim.bo.filetype == 'claude-sessions-panel' then return end
+          if vim.bo.filetype == 'claude-sessions-panel' and not renaming then return end
           return orig_cmd.startinsert(...)
         end
       end
@@ -590,15 +664,19 @@ local function install_mode_guard()
   vim.api.nvim_create_autocmd('InsertEnter', {
     callback = function(ev)
       if vim.bo.filetype ~= 'claude-sessions-panel' then return end
+      if renaming then return end -- the rename's own insert: let it be
       vim.cmd('stopinsert')
       vim.bo[ev.buf].modifiable = true
     end,
   })
   vim.api.nvim_create_autocmd('InsertLeave', {
     callback = function(ev)
-      if vim.bo[ev.buf].filetype == 'claude-sessions-panel' then
-        vim.bo[ev.buf].modifiable = false
+      if vim.bo[ev.buf].filetype ~= 'claude-sessions-panel' then return end
+      if renaming then
+        finish_rename(false) -- insert left without <CR>/<Esc>: cancel
+        return
       end
+      vim.bo[ev.buf].modifiable = false
     end,
   })
   -- ModeChanged fires AFTER the switch, so there the mode read is accurate —
@@ -606,7 +684,7 @@ local function install_mode_guard()
   vim.api.nvim_create_autocmd('ModeChanged', {
     pattern = '*:[it]*',
     callback = function()
-      if vim.bo.filetype == 'claude-sessions-panel' then vim.cmd('stopinsert') end
+      if vim.bo.filetype == 'claude-sessions-panel' and not renaming then vim.cmd('stopinsert') end
     end,
   })
   -- If insert still managed to land (a render window with modifiable=true,
@@ -614,16 +692,18 @@ local function install_mode_guard()
   -- blank every char before it lands.
   vim.api.nvim_create_autocmd('InsertCharPre', {
     callback = function()
-      if vim.bo.filetype == 'claude-sessions-panel' then vim.v.char = '' end
+      if vim.bo.filetype == 'claude-sessions-panel' and not renaming then vim.v.char = '' end
     end,
   })
   -- Braces: a stray startinsert can also slip through between events; the
   -- poll loop (300ms, only while sessions exist) notices a panel stuck in
-  -- insert and evicts it. Cheap: one mode + filetype check per tick.
+  -- insert and evicts it. Cheap: one mode + filetype check per tick. The
+  -- rename's own insert is exempt (renaming set).
   vim.api.nvim_create_autocmd('User', {
     pattern = 'ClaudeSessionsTick',
     callback = function()
       if vim.bo.filetype ~= 'claude-sessions-panel' then return end
+      if renaming then return end
       if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
     end,
   })
