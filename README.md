@@ -37,7 +37,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 While a session window is displayed, a session-list panel is split below
 nvim-tree, styled after Claude Code's session picker: two lines per session —
 a state symbol before the session name (`✓` idle, a spinning braille frame
-while busy) and the state word (`idle`/`busy`) indented on the line below —
+while busy, a red `◉` while blocked) and the state word (`idle`/`busy`/`blocked`) indented on the line below —
 with a blue `ᐅ` marker in the
 gutter of the displayed session. States are colored like Claude Code's picker:
 red for `waiting` (shown as blocked — the agent is parked on a permission

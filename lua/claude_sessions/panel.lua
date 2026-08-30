@@ -112,41 +112,6 @@ local function leave_insert()
   if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
 end
 
--- Spinner. Busy sessions show a rotating braille frame instead of a static
--- symbol; the timer below advances it one frame per SPIN_MS while the panel
--- is open and something is busy — an idle panel pays nothing. The frames are
--- all single display columns, so the layout never shifts between frames.
-local SPIN_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
-local SPIN_MS = 100
-local spin_phase = 1 -- index into SPIN_FRAMES
-local spin_timer ---@type uv.uv_timer_t?
-
---- Start the spinner timer if it is not already running. Called from render
---- when a session is busy; the tick itself stops the timer when nothing is
---- busy anymore, so no stop bookkeeping is needed on the busy->idle edge.
-local function start_spinner()
-  if spin_timer then return end
-  spin_timer = (vim.uv or vim.loop).new_timer()
-  spin_timer:start(SPIN_MS, SPIN_MS, vim.schedule_wrap(function()
-    if not active() then
-      cancel_timer(spin_timer)
-      spin_timer = nil
-      return
-    end
-    local busy = false
-    local snap = M.snapshot and M.snapshot() or {}
-    for _, s in ipairs(snap) do busy = busy or s.busy end
-    if not busy then
-      cancel_timer(spin_timer)
-      spin_timer = nil
-      M.refresh() -- the last frame falls back to ✓
-      return
-    end
-    spin_phase = (spin_phase % #SPIN_FRAMES) + 1
-    M.refresh()
-  end))
-end
-
 --- One event-loop pass from now: leave insert and put focus back on the
 --- panel. Runs FIFO behind any startinsert closures toggleterm queued behind
 --- a programmatic switch — those fire while the just-opened terminal still
@@ -168,26 +133,72 @@ end
 -- moves with the cursor instead of trailing it. The name column shows the
 -- session name — `#N claude` by default, or the session's custom name once
 -- one is set with `r`.
--- State styling: the word shown on the second line and the highlight group
--- for symbol + word, keyed by the CLI's status string. `busy` is working
--- (yellow, spinning); `waiting` — an agent parked on a permission prompt —
--- is blocked (red, spinning); anything unknown falls back to idle (green).
-local STATE_STYLE = {
-  busy = { word = 'busy', hl = 'ClaudeSessionsPanelBusy' },
-  waiting = { word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
-  idle = { word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
+
+-- Spinner. The WORKING state's symbol is a rotating braille frame; the timer
+-- below advances it one frame per SPIN_MS while the panel is open and a
+-- spinning state is on the list — an idle panel pays nothing. The frames are
+-- all single display columns, so the layout never shifts between frames.
+-- (STATE_STYLE below decides which states spin; forward-declared so the
+-- tick closure captures the local, not a nil global.)
+local STATE_STYLE
+local SPIN_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
+local SPIN_MS = 100
+local spin_phase = 1 -- index into SPIN_FRAMES
+local spin_timer ---@type uv.uv_timer_t?
+
+--- Start the spinner timer if it is not already running. Called from render
+--- when a session is busy; the tick itself stops the timer when nothing is
+--- busy anymore, so no stop bookkeeping is needed on the busy->idle edge.
+local function start_spinner()
+  if spin_timer then return end
+  spin_timer = (vim.uv or vim.loop).new_timer()
+  spin_timer:start(SPIN_MS, SPIN_MS, vim.schedule_wrap(function()
+    if not active() then
+      cancel_timer(spin_timer)
+      spin_timer = nil
+      return
+    end
+    -- Keep spinning only while a SPINNING state (working) is on the list;
+    -- blocked's ◉ is static and does not hold the timer up.
+    local spinning = false
+    local snap = M.snapshot and M.snapshot() or {}
+    for _, s in ipairs(snap) do
+      local style = STATE_STYLE[s.state or (s.busy and 'busy' or 'idle')]
+      spinning = spinning or (style and style.spin or false)
+    end
+    if not spinning then
+      cancel_timer(spin_timer)
+      spin_timer = nil
+      M.refresh() -- the last frame falls back to the static symbol
+      return
+    end
+    spin_phase = (spin_phase % #SPIN_FRAMES) + 1
+    M.refresh()
+  end))
+end
+
+-- State styling: symbol, word shown on the second line, and the highlight
+-- group for symbol + word, keyed by the CLI's status string. `busy` is
+-- working (yellow, spinning braille); `waiting` — an agent parked on a
+-- permission prompt — is blocked (a static red ◉, like the picker's);
+-- anything unknown falls back to idle (green ✓).
+STATE_STYLE = {
+  busy = { sym = nil, word = 'busy', hl = 'ClaudeSessionsPanelBusy', spin = true },
+  waiting = { sym = '◉', word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
+  idle = { sym = SYM_IDLE, word = 'idle', hl = 'ClaudeSessionsPanelIdle' },
 }
 
 local function render(buf, snap, pin_row)
   local lines = {}
-  local any_busy = false
+  local any_spinning = false
   for i, s in ipairs(snap) do
     local marked = pin_row == i or (not pin_row and s.open)
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
     local state = s.state or (s.busy and 'busy' or 'idle')
     local style = STATE_STYLE[state] or STATE_STYLE.idle
-    local sym = state ~= 'idle' and SPIN_FRAMES[spin_phase] or SYM_IDLE
-    any_busy = any_busy or state ~= 'idle'
+    -- nil sym = the working state's spinner frame
+    local sym = style.sym or SPIN_FRAMES[spin_phase]
+    any_spinning = any_spinning or style.spin
     lines[entry_line(i)] = gutter .. sym .. ' ' .. (s.name or 'claude')
     lines[entry_line(i) + 1] = string.rep(' ', WORD_PAD) .. style.word
   end
@@ -201,6 +212,7 @@ local function render(buf, snap, pin_row)
     local lnum = entry_line(i) - 1 -- 0-based symbol line
     local state = s.state or (s.busy and 'busy' or 'idle')
     local style = STATE_STYLE[state] or STATE_STYLE.idle
+    local sym = style.sym or SPIN_FRAMES[spin_phase]
     if marked then
       -- the arrow, in the commit panel's hash accent
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
@@ -209,14 +221,14 @@ local function render(buf, snap, pin_row)
     end
     -- the state symbol, in the state's color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, #gutter, {
-      end_col = #gutter + #SYM_IDLE, hl_group = style.hl,
+      end_col = #gutter + #sym, hl_group = style.hl,
     })
     -- the state word on the line below, in the same color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, WORD_PAD, {
       end_col = WORD_PAD + #style.word, hl_group = style.hl,
     })
   end
-  if any_busy then start_spinner() end
+  if any_spinning then start_spinner() end
 end
 
 -- Display the session on row `row`. keep_focus keeps the cursor on the panel
