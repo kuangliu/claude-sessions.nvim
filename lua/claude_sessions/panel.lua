@@ -57,6 +57,11 @@ local arrow_row = nil
 -- offset of the name in that line (the backspace floor).
 local renaming = nil
 
+-- Insert-mode keys the rename's backspace floor arms (see rename_current_row):
+-- both delete leftward, so both must stop at the name. One list for the set
+-- (edit start) and the del (edit end) so they can never drift apart.
+local FLOOR_KEYS = { '<BS>', '<C-w>' }
+
 -- Layout, Claude-Code session-picker style. Session n owns buffer lines
 -- 3n-2 (symbol + name) and 3n-1 (state word, indented under the name), with a
 -- blank separator line at 3n between entries:
@@ -114,6 +119,13 @@ end
 --- Is the panel window (still) up?
 local function active()
   return M.win ~= nil and vim.api.nvim_win_is_valid(M.win)
+end
+
+--- The live rows as an always-indexable array. Empty until the main module
+--- binds the hook — the panel is inert before that, and every reader here
+--- (spinner tick, keymaps, refresh) wants rows without a nil check.
+local function snapshot()
+  return M.snapshot and M.snapshot() or {}
 end
 
 --- Stop and dispose of a uv timer. Either call can fail on an already-closed
@@ -201,8 +213,7 @@ local function start_spinner()
     -- Keep spinning only while a SPINNING state (working) is on the list;
     -- blocked's ◉ is static and does not hold the timer up.
     local spinning = false
-    local snap = M.snapshot and M.snapshot() or {}
-    for _, s in ipairs(snap) do
+    for _, s in ipairs(snapshot()) do
       spinning = spinning or state_style(s).spin or false
     end
     if not spinning then
@@ -341,7 +352,7 @@ end
 local function step(dir)
   local row = cursor_row()
   if not row then return end
-  local snap = M.snapshot and M.snapshot() or {}
+  local snap = snapshot()
   row = row + dir
   if row < 1 or row > #snap then return end
   vim.api.nvim_win_set_cursor(M.win, { entry_line(row), 0 })
@@ -390,14 +401,15 @@ local function finish_rename(apply)
   local r = renaming
   renaming = nil
   pcall(vim.cmd, 'stopinsert') -- the <CR>/<Esc> mappings replace the builtin leave
-  pcall(vim.keymap.del, 'i', '<BS>', { buffer = M.buf })
-  pcall(vim.keymap.del, 'i', '<C-w>', { buffer = M.buf })
-  local value
-  if apply and M.buf and vim.api.nvim_buf_is_valid(M.buf) then
-    local line = vim.api.nvim_buf_get_lines(M.buf, r.lnum, r.lnum + 1, false)[1] or ''
-    value = vim.trim(line:sub(r.name_col))
+  for _, key in ipairs(FLOOR_KEYS) do
+    pcall(vim.keymap.del, 'i', key, { buffer = M.buf })
   end
+  local value
   if M.buf and vim.api.nvim_buf_is_valid(M.buf) then
+    if apply then
+      local line = vim.api.nvim_buf_get_lines(M.buf, r.lnum, r.lnum + 1, false)[1] or ''
+      value = vim.trim(line:sub(r.name_col))
+    end
     vim.bo[M.buf].modifiable = false
   end
   if value then
@@ -414,8 +426,7 @@ end
 local function rename_current_row()
   local row = cursor_row()
   if not row or renaming then return end
-  local snap = M.snapshot and M.snapshot() or {}
-  local s = snap[row]
+  local s = snapshot()[row]
   if not s then return end
   local name = s.name or 'claude'
   local lnum = entry_line(row) - 1 -- 0-based symbol line
@@ -435,10 +446,10 @@ local function rename_current_row()
     if vim.fn.col('.') <= name_col then return '' end
     return '<BS>'
   end
-  vim.keymap.set('i', '<BS>', backspace_floor,
-    { buffer = M.buf, expr = true, replace_keycodes = true, desc = 'claude sessions: rename floor' })
-  vim.keymap.set('i', '<C-w>', backspace_floor,
-    { buffer = M.buf, expr = true, replace_keycodes = true, desc = 'claude sessions: rename floor' })
+  for _, key in ipairs(FLOOR_KEYS) do
+    vim.keymap.set('i', key, backspace_floor,
+      { buffer = M.buf, expr = true, replace_keycodes = true, desc = 'claude sessions: rename floor' })
+  end
   vim.bo[M.buf].modifiable = true
   -- byte col just past the name's last char = where insert mode starts typing
   vim.fn.cursor(lnum + 1, name_col + #name)
@@ -474,7 +485,7 @@ function M.refresh()
   -- spinner frame, a busy-state flip) would clobber the edit mid-keystroke.
   -- finish_rename repaints after the edit ends.
   if renaming then return end
-  local snap = M.snapshot and M.snapshot() or {}
+  local snap = snapshot()
   if #snap == 0 then
     M.close()
     return
@@ -510,7 +521,7 @@ end
 -- <C-s> switch settles.
 function M.follow()
   if M.switching or not active() then return end
-  follow_displayed(M.snapshot and M.snapshot() or {})
+  follow_displayed(snapshot())
 end
 
 local function make_panel_buffer()
@@ -567,7 +578,7 @@ function M.open()
     return
   end
   M.close()
-  local snap = M.snapshot and M.snapshot() or {}
+  local snap = snapshot()
   if #snap == 0 then return end
   local tw = tree_window()
   if not tw then return end
@@ -615,6 +626,13 @@ end
 -- change), so intercept at the one seam we own: vim.cmd, while the panel is
 -- the focused window. Calls from anywhere else pass straight through.
 local function install_mode_guard()
+  -- Every hook below shares one predicate: an insert the panel does not want
+  -- — one that lands on the panel buffer while no rename is in flight (a
+  -- rename's own insert is deliberate and passes; see `renaming` above).
+  local function stray_insert(buf)
+    return vim.bo[buf].filetype == 'claude-sessions-panel' and not renaming
+  end
+
   -- Root interception: the stray call is literally `vim.cmd('startinsert')`
   -- from a toggleterm closure, and when the panel holds focus that command
   -- would either enter insert on this buffer or (on a nomodifiable buffer)
@@ -637,17 +655,13 @@ local function install_mode_guard()
   ---@diagnostic disable-next-line: duplicate-set-field
   vim.cmd = setmetatable({}, {
     __call = function(_, cmd, ...)
-      -- An in-place rename WANTS insert on the panel: let its startinsert
-      -- (and everyone else's, for the duration) through.
-      if is_startinsert(cmd) and vim.bo.filetype == 'claude-sessions-panel' and not renaming then
-        return
-      end
+      if is_startinsert(cmd) and stray_insert(0) then return end
       return orig_cmd(cmd, ...)
     end,
     __index = function(_, k)
       if k == 'startinsert' then
         return function(...)
-          if vim.bo.filetype == 'claude-sessions-panel' and not renaming then return end
+          if stray_insert(0) then return end
           return orig_cmd.startinsert(...)
         end
       end
@@ -663,8 +677,7 @@ local function install_mode_guard()
   -- above are absorbed without E21, and restored on leave.
   vim.api.nvim_create_autocmd('InsertEnter', {
     callback = function(ev)
-      if vim.bo.filetype ~= 'claude-sessions-panel' then return end
-      if renaming then return end -- the rename's own insert: let it be
+      if not stray_insert(ev.buf) then return end
       vim.cmd('stopinsert')
       vim.bo[ev.buf].modifiable = true
     end,
@@ -684,7 +697,7 @@ local function install_mode_guard()
   vim.api.nvim_create_autocmd('ModeChanged', {
     pattern = '*:[it]*',
     callback = function()
-      if vim.bo.filetype == 'claude-sessions-panel' and not renaming then vim.cmd('stopinsert') end
+      if stray_insert(0) then vim.cmd('stopinsert') end
     end,
   })
   -- If insert still managed to land (a render window with modifiable=true,
@@ -692,7 +705,7 @@ local function install_mode_guard()
   -- blank every char before it lands.
   vim.api.nvim_create_autocmd('InsertCharPre', {
     callback = function()
-      if vim.bo.filetype == 'claude-sessions-panel' and not renaming then vim.v.char = '' end
+      if stray_insert(0) then vim.v.char = '' end
     end,
   })
   -- Braces: a stray startinsert can also slip through between events; the
@@ -702,8 +715,7 @@ local function install_mode_guard()
   vim.api.nvim_create_autocmd('User', {
     pattern = 'ClaudeSessionsTick',
     callback = function()
-      if vim.bo.filetype ~= 'claude-sessions-panel' then return end
-      if renaming then return end
+      if not stray_insert(0) then return end
       if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
     end,
   })
@@ -723,7 +735,7 @@ function M.setup()
     pattern = 'NvimTree',
     callback = function()
       vim.schedule(function()
-        local snap = M.snapshot and M.snapshot() or {}
+        local snap = snapshot()
         local visible = false
         for _, s in ipairs(snap) do
           visible = visible or s.open
