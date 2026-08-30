@@ -1,10 +1,10 @@
 -- The session-list panel split below nvim-tree, styled after Claude Code's
--- session picker: TWO buffer lines per live claude session — a state symbol
--- (✓ idle, a spinning braille frame while busy) before the name, and the
--- state word on the line below, indented under the name. The displayed
--- session's entry carries a blue ᐅ in the leading gutter and a two-line block
--- background that the panel cursor rests on; stepping switches sessions live
--- (debounced while held).
+-- session picker: each live claude session renders as THREE buffer lines — a
+-- state symbol (✓ idle, a spinning braille frame while busy) before the name,
+-- the state word indented on the line below, then a blank separator. The
+-- displayed session's entry carries a blue ᐅ in the leading gutter and a
+-- two-line block background that the panel cursor rests on; stepping switches
+-- sessions live (debounced while held).
 --
 -- Shown while a session window is displayed and an nvim-tree window exists to
 -- split below; closed when the last displayed session closes. The panel never
@@ -143,8 +143,8 @@ end
 -- session — the DISPLAYED one by default (the one the statusline dots mark
 -- with •), or `pin_row` while a debounced step is in flight so the marker
 -- moves with the cursor instead of trailing it. The name column shows the
--- session name — `#N claude` by default, or the session's custom name once
--- one is set with `r`.
+-- session's custom name once one is set with `r`; the default is just
+-- `claude` (the panel cursor and window layout tell sessions apart).
 
 -- Spinner. The WORKING state's symbol is a rotating braille frame; the timer
 -- below advances it one frame per SPIN_MS while the panel is open and a
@@ -209,6 +209,15 @@ local function rune_len(str)
   return vim.fn.strcharlen(str)
 end
 
+--- Resolved display state of one snapshot row: the STYLE (symbol/word/hl/
+--- spin) and whether the ᐅ marks this entry. `pin_row` (a debounced step in
+--- flight) overrides the displayed session as the marked entry.
+local function row_state(s, pin_row, i)
+  local state = s.state or (s.busy and 'busy' or 'idle')
+  local style = STATE_STYLE[state] or STATE_STYLE.idle
+  return style, pin_row == i or (not pin_row and s.open)
+end
+
 local function render(buf, snap, pin_row)
   local lines = {}
   local any_spinning = false
@@ -220,19 +229,16 @@ local function render(buf, snap, pin_row)
   -- Extmark columns stay BYTE offsets; the width/pad arithmetic is in columns.
   local width = active() and vim.api.nvim_win_get_width(M.win) or 80
   for i, s in ipairs(snap) do
-    local marked = pin_row == i or (not pin_row and s.open)
-    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
-    local state = s.state or (s.busy and 'busy' or 'idle')
-    local style = STATE_STYLE[state] or STATE_STYLE.idle
+    local style, marked = row_state(s, pin_row, i)
     -- nil sym = the working state's spinner frame
     local sym = style.sym or SPIN_FRAMES[spin_phase]
     any_spinning = any_spinning or style.spin
+    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
     local name = s.name or 'claude'
-    local name_cols = rune_len(name)
     -- Columns, not bytes: the arrow gutter is 5 bytes / 4 columns.
-    local name_pad = string.rep(' ',
-      math.max(width - GUTTER_COLS - rune_len(sym) - SYM_GAP - name_cols, 0))
-    lines[entry_line(i)] = gutter .. sym .. string.rep(' ', SYM_GAP) .. name .. name_pad
+    local pad = string.rep(' ',
+      math.max(width - GUTTER_COLS - rune_len(sym) - SYM_GAP - rune_len(name), 0))
+    lines[entry_line(i)] = gutter .. sym .. string.rep(' ', SYM_GAP) .. name .. pad
     local word_line = string.rep(' ', WORD_PAD) .. style.word
     lines[entry_line(i) + 1] = word_line .. string.rep(' ', math.max(width - #word_line, 0))
     -- a blank separator line below every entry (a trailing one too: it never
@@ -244,30 +250,27 @@ local function render(buf, snap, pin_row)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
   for i, s in ipairs(snap) do
-    local marked = pin_row == i or (not pin_row and s.open)
+    local style, marked = row_state(s, pin_row, i)
+    local sym = style.sym or SPIN_FRAMES[spin_phase]
     local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
     local lnum = entry_line(i) - 1 -- 0-based symbol line
-    local state = s.state or (s.busy and 'busy' or 'idle')
-    local style = STATE_STYLE[state] or STATE_STYLE.idle
-    local sym = style.sym or SPIN_FRAMES[spin_phase]
     -- Byte offsets for the marks: gutter/symbol/name segments of the line.
     local sym_col = #gutter
     local name_col = sym_col + #sym + SYM_GAP
-    local name_end = name_col + #(s.name or 'claude')
-    local row_bytes = #(lines[entry_line(i)])
     if marked then
       -- The selected entry highlights as ONE block: one full-width background
       -- mark per line (the lines themselves are padded to the window width).
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 0, {
-        end_row = lnum, end_col = row_bytes, hl_group = 'ClaudeSessionsPanelCursor',
+        end_row = lnum, end_col = #lines[entry_line(i)], hl_group = 'ClaudeSessionsPanelCursor',
       })
       vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, 0, {
-        end_row = lnum + 1, end_col = #(lines[entry_line(i) + 1]),
+        end_row = lnum + 1, end_col = #lines[entry_line(i) + 1],
         hl_group = 'ClaudeSessionsPanelCursor',
       })
-      -- the arrow, in the commit panel's hash accent
+      -- the arrow, in the commit panel's hash accent (col 1..4: one space,
+      -- then the 3-byte ᐅ)
       vim.api.nvim_buf_set_extmark(buf, ns, lnum, 1, {
-        end_col = 4, hl_group = 'ClaudeSessionsPanelArrow',
+        end_col = 1 + #'ᐅ', hl_group = 'ClaudeSessionsPanelArrow',
       })
     end
     -- the state symbol, in the state's color (ends before the 2-space gap)
@@ -276,7 +279,7 @@ local function render(buf, snap, pin_row)
     })
     -- the session name, in bold
     vim.api.nvim_buf_set_extmark(buf, ns, lnum, name_col, {
-      end_col = name_end, hl_group = 'ClaudeSessionsPanelName',
+      end_col = name_col + #(s.name or 'claude'), hl_group = 'ClaudeSessionsPanelName',
     })
     -- the state word on the line below, in the same color
     vim.api.nvim_buf_set_extmark(buf, ns, lnum + 1, WORD_PAD, {
@@ -286,12 +289,12 @@ local function render(buf, snap, pin_row)
   if any_spinning then start_spinner() end
 end
 
---- Rest the panel cursor on the displayed session's symbol line — the entry
---- the block background is drawn on — so the raw editor cursor never sits
---- beside an unhighlighted entry (a stray block on the left edge). Stepping
---- holds the cursor where the user put it until the switch settles.
-local function rest_cursor(snap)
-  if arrow_row then return end
+--- Move the panel cursor to the symbol line of the DISPLAYED session — the
+--- entry the block background is drawn on — so the raw editor cursor never
+--- sits beside an unhighlighted row (a stray block on the left edge). Two
+--- callers, one job: after a switch settles (`follow`) and after any refresh
+--- with no step in flight (stepping holds the cursor where the user put it).
+local function follow_displayed(snap)
   for i, s in ipairs(snap) do
     if s.open then
       pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(i), 0 })
@@ -309,18 +312,25 @@ local function select_row(row, keep_focus)
   M.stepping = false
 end
 
+--- The session row under the panel cursor, or nil when the panel is gone.
+--- Keys can arrive while the panel lacks focus (they route through the
+--- terminal window that shows it below the tree), so the cursor is always
+--- read from the panel's own window, wherever focus is.
+local function cursor_row()
+  if not active() then return nil end
+  return line_entry(vim.api.nvim_win_get_cursor(M.win)[1])
+end
+
 -- <Down>/<Up>/j/k: move the cursor one entry and switch to that session. The
 -- MARKER moves with the cursor — the entry is re-rendered with the arrow
 -- pinned to it in the same keystroke. The switch itself is debounced (~120ms):
 -- held keys sweep the cursor without paying a terminal open per entry, and
 -- the entry under the cursor when the sweep settles is the one that loads.
 local function step(dir)
-  -- The panel may not currently hold focus (keys go through the terminal
-  -- window that shows the cursorline'd panel below the tree); drive its
-  -- cursor from wherever we are.
-  if not active() then return end
+  local row = cursor_row()
+  if not row then return end
   local snap = M.snapshot and M.snapshot() or {}
-  local row = line_entry(vim.api.nvim_win_get_cursor(M.win)[1]) + dir
+  row = row + dir
   if row < 1 or row > #snap then return end
   vim.api.nvim_win_set_cursor(M.win, { entry_line(row), 0 })
 
@@ -333,7 +343,7 @@ local function step(dir)
   step_timer = vim.defer_fn(function()
     step_timer = nil
     if not active() then return end
-    select_row(line_entry(vim.api.nvim_win_get_cursor(M.win)[1]), true)
+    select_row(cursor_row(), true)
     -- The switch settled: the displayed session now IS the cursor entry, so
     -- the pin drops and the marker rests on the displayed session again.
     arrow_row = nil
@@ -346,23 +356,23 @@ end
 
 -- <CR>/l/o: switch to the session under the cursor and focus it.
 local function open_current()
-  if not active() then return end
-  select_row(line_entry(vim.api.nvim_win_get_cursor(M.win)[1]), false)
+  local row = cursor_row()
+  if row then select_row(row, false) end
 end
 
 -- <C-d>: kill the session under the cursor. Same semantics as terminal-mode
 -- <C-d>: the process dies, the rows disappear, the split shows the next
 -- session. Focus stays on the panel.
 local function close_current_row()
-  if not active() then return end
-  M.close_session(line_entry(vim.api.nvim_win_get_cursor(M.win)[1]))
+  local row = cursor_row()
+  if row then M.close_session(row) end
 end
 
 -- <r>: rename the session under the cursor. An empty input restores the
--- default `#N claude` name; Esc cancels.
+-- default `claude` name; Esc cancels.
 local function rename_current_row()
-  if not active() then return end
-  local row = line_entry(vim.api.nvim_win_get_cursor(M.win)[1])
+  local row = cursor_row()
+  if not row then return end
   local default = M.row_name and M.row_name(row) or ''
   vim.ui.input({ prompt = 'Session name: ', default = default }, function(value)
     if value == nil then return end -- cancelled
@@ -406,7 +416,7 @@ function M.refresh()
   pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(line_entry(line)), 0 })
   -- No step in flight: rest the cursor on the displayed session's entry so it
   -- never sits beside an unhighlighted row (the stray block on the left).
-  rest_cursor(snap)
+  if not arrow_row then follow_displayed(snap) end
 end
 
 -- Registry changed: refresh the rows, or close the panel when no session
@@ -424,17 +434,11 @@ function M.sync(visible)
   end
 end
 
--- Move the panel cursor to the symbol line of the currently displayed session
--- (the switch machinery marks it `open`). Called after a <C-s> switch settles.
+-- Move the panel cursor to the displayed session's entry. Called after a
+-- <C-s> switch settles.
 function M.follow()
   if M.switching or not active() then return end
-  local snap = M.snapshot and M.snapshot() or {}
-  for i, s in ipairs(snap) do
-    if s.open then
-      pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(i), 0 })
-      return
-    end
-  end
+  follow_displayed(M.snapshot and M.snapshot() or {})
 end
 
 local function make_panel_buffer()
