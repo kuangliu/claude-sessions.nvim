@@ -539,8 +539,9 @@ end
 -- Panel keymaps. Editing keys have no business here, and on a nomodifiable
 -- buffer nvim refuses them with a noisy E21 (the reported error). Silence the
 -- common ones FIRST so the functional maps below win; everything else keeps
--- its default.
-local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u', '<C-a>' }
+-- its default. NOT silenced: <C-a> — the global mapping creates a session,
+-- and that must work with the cursor on the panel too.
+local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u' }
 
 local function set_keymaps(buf)
   for _, key in ipairs(SILENCED_KEYS) do
