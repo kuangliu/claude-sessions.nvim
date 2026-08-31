@@ -422,7 +422,7 @@ function M.create()
   local record = { name = '' } -- renumbered below
   local Terminal = require('toggleterm.terminal').Terminal
   record.term = Terminal:new({
-    cmd = 'claude',
+    cmd = 'claude --allow-dangerously-skip-permissions',
     direction = 'vertical',
     display_name = '', -- set by renumber()
     -- Empty string == unset for claude's child-session check (verified): this
