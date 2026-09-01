@@ -147,8 +147,12 @@ local function show_window(buf)
     return
   end
   -- Host for the split: a displayed session window keeps the pane beside the
-  -- terminal; no session on screen, fall back to plain vsplit from where we
-  -- are.
+  -- terminal — BETWEEN the tree and the terminal (tree → pane → terminal, the
+  -- sidebar's file list reading straight into its diff), not the far right
+  -- the global `splitright` would put it. `splitright = false` while the
+  -- split lands puts the pane on the terminal's left; the one-split flip is
+  -- restored before anything else can read it. No session on screen: plain
+  -- vsplit from where we are.
   local host = U.window_with_filetype('claude')
   local prev = vim.api.nvim_get_current_win()
   if host then
@@ -156,7 +160,10 @@ local function show_window(buf)
   end
   -- Seed the width like the terminal's own: `columns * 0.4` (the sessions
   -- config's vertical size), so the pane and the terminal read as one pair.
+  local splitright = vim.o.splitright
+  vim.o.splitright = false
   vim.cmd('40vsplit')
+  vim.o.splitright = splitright
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   plain_diff_window(win)
