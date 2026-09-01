@@ -80,4 +80,19 @@ function U.set_rows(buf, ns, lines, marks)
   end
 end
 
+-- Editing keys have no business on a read-only panel buffer, and on a
+-- nomodifiable one nvim refuses them with a noisy E21. Silence the common
+-- ones FIRST so a panel's functional maps win; everything else keeps its
+-- default. NOT silenced: <C-a> — the global mapping creates a session, and
+-- that must work with the cursor on a panel too. (Also silenced by the diff
+-- panel: j/k move its cursor, not insert.)
+U.SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u' }
+
+--- Silence the editing keys on a read-only panel buffer (see SILENCED_KEYS).
+function U.silence_editing_keys(buf)
+  for _, key in ipairs(U.SILENCED_KEYS) do
+    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
+  end
+end
+
 return U

@@ -19,6 +19,13 @@
 -- at all: open() splits only when `git status` reports changes, and a refresh
 -- that finds none closes it again — the tree and the session list take the
 -- rows back (see calibrate_sidebar). The panel is read-only.
+--
+-- Selection IS focus, like the session-list panel's: the file the panel
+-- window's cursor rests on draws the two-line block background (that panel's
+-- ClaudeSessionsPanelCursor group) while the panel holds focus, and the block
+-- clears the moment focus moves away (WinLeave's repaint — focus_panel).
+-- j/k move the cursor onto an entry's name line, with the block landing
+-- there in the same keystroke.
 
 local U = require('claude_sessions.util')
 
@@ -32,6 +39,10 @@ local ns = vim.api.nvim_create_namespace('claude_sessions_diff')
 local ADD_HL = 'ClaudeSessionsDiffAdd'
 local DEL_HL = 'ClaudeSessionsDiffDel'
 local UNTR_HL = 'ClaudeSessionsDiffUntracked'
+-- The selected entry's two-line block background: the session panel's group
+-- (a faint read on top of the normal background), so the two panels read as
+-- one system.
+local CURSOR_HL = 'ClaudeSessionsPanelCursor'
 
 -- How many added/removed lines a full-width bar of blocks represents; a
 -- file's bar is min(change / BAR_SCALE, 1) of the width. 100 ≈ a typical
@@ -45,6 +56,31 @@ local in_flight = false -- a refresh's two probes are running; don't queue more
 --- no git jobs.
 function M.active()
   return M.win ~= nil and vim.api.nvim_win_is_valid(M.win)
+end
+
+--- The file the panel cursor selects: the window cursor's entry, one-based,
+--- or nil (no panel, or the panel LACKS focus — an unfocused panel draws no
+--- selection block; the cursor is the raw editor cursor, and where focus went
+--- is none of this panel's business). The rows are three-line groups (name /
+--- counts / blank) in the SAME shape the session panel renders, so its
+--- mapping applies: any line — a name, a counts row, or the blank below it —
+--- attributes to the entry it belongs to with floor((line + 2) / 3), clamped
+--- to the live count (a cursor left on a row the last render dropped must not
+--- select past the list). The block is drawn on this entry per repaint, so
+--- focusing the panel is what selects a file — and unfocusing it is what
+--- clears the block (focus_panel's own repaint).
+local function cursor_row()
+  if not (M.active() and M.buf and vim.api.nvim_buf_is_valid(M.buf)) then return nil end
+  -- Focus gate: the block reads as the editor cursor's position — an editor
+  -- cursor parked elsewhere is no selection, like a cursorline on an
+  -- unfocused window (nvim clears its own cursorline on WinLeave for the
+  -- same read).
+  if vim.api.nvim_get_current_win() ~= M.win then return nil end
+  local count = vim.api.nvim_buf_line_count(M.buf)
+  if count == 0 then return nil end
+  local line = vim.api.nvim_win_get_cursor(M.win)[1]
+  return math.min(math.max(math.floor((line + 2) / 3), 1),
+    math.max(math.floor(count / 3), 1))
 end
 
 --- The window currently showing nvim-tree's buffer, or nil. (Current tabpage
@@ -214,15 +250,42 @@ local RENDER_INDENT = '  '
 -- one mis-capture (close() indexed an unrelated render upvalue) tears the
 -- whole coalesce down.
 local last_text = nil
+-- The line the last render drew the selection block on: the coalesce's other
+-- half — rows byte-identical but the cursor moved between same-shaped entries
+-- must still repaint (the block lands on the new entry; see render).
+local last_row = nil
+-- The rows the last refresh rendered: focus_panel's repaint re-renders them
+-- (the block lands where the cursor went / nothing where it left) without
+-- re-running the two git probes — a focus flip must not pay for two jobs.
+local last_files = nil
 local function render(buf, files)
   local lines = {}
   local marks = {}
+  -- The file the cursor selects, derived once per repaint: the block follows
+  -- the raw window cursor, and the FOCUS gate inside cursor_row is what makes
+  -- a focus flip select a file / clear the block.
+  local row = cursor_row()
   local lnum = 0 -- buffer row, zero-based — advances three per file
   -- Render constants, hoisted: the two rows spell the SAME
   -- `' ' .. RENDER_INDENT` prefix (both align at column COUNTS_COL, the
   -- offset every mark below assumes), and the two-count gap is one space.
   local COUNTS_COL = 1 + #RENDER_INDENT
-  for _, f in ipairs(files) do
+  -- The selection block is a plain row mark, and a plain row mark stops at
+  -- the row's own end — pad both rows of the SELECTED entry to the window's
+  -- width so the block reads full-width (the session panel pads its own rows
+  -- for the same block). Width re-read per render: the sidebar can resize
+  -- between renders. Padding arithmetic is RUNE count, not `#` — the bar's
+  -- `▪` blocks are 3 bytes apiece and one display column each (the session
+  -- panel's rune_len for the same reason), and extmark columns are byte
+  -- offsets, so the block's span needs the BYTE length of the padded row —
+  -- spelled from the rune count + the pad's own bytes.
+  local width = M.active() and vim.api.nvim_win_get_width(M.win) or 80
+  local pad_row = function()
+    local runes = vim.fn.strcharlen(lines[#lines])
+    local pad = math.max(width - runes, 0)
+    lines[#lines] = lines[#lines] .. string.rep(' ', pad)
+  end
+  for i, f in ipairs(files) do
     -- First row: the file's NAME only (the basename — the directories of the
     -- path are dropped), indented like the counts below it — the same one
     -- leading space plus RENDER_INDENT, so both rows align at column
@@ -230,6 +293,7 @@ local function render(buf, files)
     local name = f.path:match('[^/]+$') or f.path
     lines[#lines + 1] = ' ' .. RENDER_INDENT .. name
     lnum = lnum + 1
+    if row == i then pad_row() end
 
     -- Second row: the counts and the bar, indented under the name — the SAME
     -- one leading space plus RENDER_INDENT (both rows align at COUNTS_COL).
@@ -267,6 +331,18 @@ local function render(buf, files)
         }
       end
     end
+    -- Second row of the SELECTED entry: pad AFTER the bar's own marks (they
+    -- read byte offsets up to the bar's end — padding past them is safe).
+    if row == i then pad_row() end
+    -- The SELECTED entry's block background: one row mark per row, spanning
+    -- the padded full width (`col = 0` → the row's own BYTE length — the
+    -- pad_row above already spelled it, and extmark columns are byte offsets,
+    -- so `#` is the exact span). Two marks, NOT one spanning mark — rows
+    -- advance by three per file, so a row-pair block is two single-row marks.
+    if row == i then
+      marks[#marks + 1] = { lnum = lnum - 1, col = 0, end_col = #lines[#lines - 1], hl = CURSOR_HL }
+      marks[#marks + 1] = { lnum = lnum, col = 0, end_col = #lines[#lines], hl = CURSOR_HL }
+    end
     lnum = lnum + 1
 
     -- A blank separator line below every entry — like the session-list panel
@@ -280,12 +356,88 @@ local function render(buf, files)
   -- and the usual result is rows byte-identical to the last (the agent writes
   -- every few seconds, not every 300ms). Coalesce the rewrite — set_lines
   -- marks every row changed and invalidates the window for a full redraw —
-  -- when the fresh rows spell the same text.
+  -- when the fresh rows spell the same text. A cursor move never coalesces
+  -- here: the pad_row above spells the selected entry's rows differently from
+  -- its unselected spell, so a move changes the text — EXCEPT a move within
+  -- same-shaped entries (two files with byte-identical rows spell the same
+  -- padded text), which is fine to coalesce: the marks replay from the fresh
+  -- `row` either way.
   local text = table.concat(lines, '\n')
-  if text == (last_text or '') then return end
+  if text == (last_text or '') then
+    -- Rows byte-identical but the cursor moved between same-shaped entries:
+    -- the block must still land on the new entry. Repaint the marks only.
+    if last_row ~= row then
+      last_row = row
+      U.set_rows(M.buf, ns, lines, marks)
+    end
+    return
+  end
   last_text = text
+  last_row = row
   -- util's rewrite helper — the session panel's render lands the same way.
   U.set_rows(buf, ns, lines, marks)
+end
+
+--- Move the panel cursor `d` entries (j: +1, k: −1), clamped to the live row
+--- count. A move from the first entry starts at the first (j) or last (k).
+--- The move lands on the entry's NAME line (the block's top row — the same
+--- rule the session panel's step applies), and the repaint below draws the
+--- block on the new entry in the same keystroke: the block follows the raw
+--- cursor, so moving the cursor IS the selection.
+local function move_cursor(d)
+  if not M.active() then return end
+  local count = vim.api.nvim_buf_line_count(M.buf)
+  local n = math.max(math.floor(count / 3), 0)
+  if n == 0 then return end
+  local row = cursor_row()
+  row = row == nil and (d > 0 and 1 or n) or math.min(math.max(row + d, 1), n)
+  pcall(vim.api.nvim_win_set_cursor, M.win, { 3 * row - 2, 0 })
+  M.refresh()
+end
+
+--- j/k: move the panel cursor. The panel is read-only; these are the only
+--- functional maps on its buffer — the editing keys are silenced first
+--- (util's shared list) so these win, and everything else keeps its default.
+--- NOT silenced: <C-a> — the global mapping creates a session, and that must
+--- work with the cursor on this panel too.
+local function set_keymaps(buf)
+  U.silence_editing_keys(buf)
+  local function map(key, d, desc)
+    vim.keymap.set('n', key, function() move_cursor(d) end,
+      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
+  end
+  map('j', 1, 'next file')
+  map('k', -1, 'previous file')
+  map('<Down>', 1, 'next file')
+  map('<Up>', -1, 'previous file')
+end
+
+--- Repaint the rows through a FOCUS flip: focus arrived (the block lands on
+--- the cursor's entry) or focus left (cursor_row's focus gate nils the
+--- selection, and the unpadded rows clear it). Re-renders the remembered rows
+--- — no git jobs on a focus flip — and coalesces when the fresh spell is
+--- byte-identical to the last (a flip within same-shaped entries), since the
+--- marks replay from the fresh `row` either way.
+---
+--- The repaint lands ONE PASS LATER, not inside the event: the WinLeave/
+--- WinEnter pair dispatches out of order (the leave can arrive after the
+--- enter of a round-trip — verified through wincmd), so a gate read inside
+--- either event sees whoever was current at dispatch, not where focus
+--- settled. A pass later every event has dispatched and the current-window
+--- read inside cursor_row is settled — the settled read IS the final state.
+--- A flip queues at most one repaint (the flag), so held-key window sweeps
+--- pay one render, not one per window crossed.
+local repaint_scheduled = false
+local function focus_panel()
+  if repaint_scheduled then return end
+  repaint_scheduled = true
+  vim.schedule(function()
+    repaint_scheduled = false
+    if not (M.active() and last_files and M.buf and vim.api.nvim_buf_is_valid(M.buf)) then
+      return
+    end
+    render(M.buf, last_files)
+  end)
 end
 
 --- Fetch the current diff and repaint the panel. No-op when the panel is
@@ -320,6 +472,9 @@ function M.refresh()
       M.close() -- workspace went clean: drop the panel
       return
     end
+    -- Remember the live rows: focus_panel's repaint re-renders them without
+    -- re-running the two git probes (a focus flip must not pay for two jobs).
+    last_files = files
     render(M.buf, files)
   end
   fetch_numstat(root, function(rows)
@@ -348,6 +503,8 @@ function M.close()
   M.win, M.buf = nil, nil
   M.root = nil -- the next open() re-runs rev-parse; no stale root for refresh
   last_text = nil -- the next open() renders into a fresh buffer
+  last_files = nil -- focus_panel's repaint has no rows to re-render either
+  last_row = nil
 end
 
 --- (Re)open the panel below the nvim-tree window and repaint the rows. No-op
@@ -368,6 +525,9 @@ local opening = false
 --- callback (scheduled) — the same focus/calibration comments apply below.
 local function open_split(root, tw)
   local buf = U.scratch_buffer('claude-sessions-diff')
+  -- Panel keymaps land on the buffer — j/k move the cursor (the selection
+  -- follows it), and nothing else is functional on this read-only text.
+  set_keymaps(buf)
   -- The sidebar is exact thirds (tree → this panel → session list). Seed the
   -- split with a plain third of the screen — the frame's cmdline/statusline/
   -- tabline rows only shift the seed, and calibrate_sidebar below asserts the
@@ -471,9 +631,18 @@ end
 
 --- Highlights on setup and on every colorscheme change, like the session
 --- panel's groups.
+---
+--- The focus-flip autocmds are setup state, not open() state: they are
+--- GLOBAL (pattern `*`, see focus_panel's comment) — wiring them in open()
+--- would pair them up on every open (the panel can close and re-open any
+--- number of times). The singleton pair here queues focus_panel on every
+--- switch; focus_panel's own gates (the active/last_files checks inside the
+--- scheduled pass) stand in for anything per-open to forget.
 function M.setup()
   define_highlights()
   vim.api.nvim_create_autocmd('ColorScheme', { callback = define_highlights })
+  vim.api.nvim_create_autocmd('WinEnter', { pattern = '*', callback = focus_panel })
+  vim.api.nvim_create_autocmd('WinLeave', { pattern = '*', callback = focus_panel })
 end
 
 return M

@@ -530,15 +530,14 @@ end
 
 -- Panel keymaps. Editing keys have no business here, and on a nomodifiable
 -- buffer nvim refuses them with a noisy E21 (the reported error). Silence the
--- common ones FIRST so the functional maps below win; everything else keeps
--- its default. NOT silenced: <C-a> — the global mapping creates a session,
--- and that must work with the cursor on the panel too.
-local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u' }
+-- common ones FIRST (util's shared list — the diff panel silences the same
+-- ones, minus its own j/k cursor moves) so the functional maps below win;
+-- everything else keeps its default. NOT silenced: <C-a> — the global mapping
+-- creates a session, and that must work with the cursor on the panel too.
+local SILENCED_KEYS = U.SILENCED_KEYS
 
 local function set_keymaps(buf)
-  for _, key in ipairs(SILENCED_KEYS) do
-    vim.keymap.set('n', key, '<Nop>', { buffer = buf, nowait = true, silent = true })
-  end
+  U.silence_editing_keys(buf)
   local function map(key, fn, desc)
     vim.keymap.set('n', key, fn,
       { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
