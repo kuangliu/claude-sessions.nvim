@@ -299,6 +299,21 @@ local function render(files)
   U.set_rows(M.buf, ns, lines, marks)
 end
 
+--- The selection the cursor's row picks: `last_files`' row `row`, or nil when
+--- the rows are gone. What the pane renders — the file whose name the block
+--- lands on.
+local function row_file(row)
+  local files = last_files
+  return files and files[row] or nil
+end
+
+--- Render the selected file's diff in the right-side pane. Rows carry the
+--- repo-RELATIVE path (numstat's spelling), which the pane takes directly.
+local function select_pane(file)
+  if not file then return end
+  diff_view.show(file.path, panel_root)
+end
+
 --- Move the panel cursor `d` entries (j: +1, k: −1), clamped to the live row
 --- count. A move from the first entry starts at the first (j) or last (k).
 --- The move lands on the entry's NAME line (the block's top row — the same
@@ -318,21 +333,6 @@ local function move_cursor(d)
   -- The file the cursor just landed on IS the selection: its diff renders in
   -- the right-side pane in the same keystroke (a no-op without diffview).
   select_pane(row_file(row))
-end
-
---- The selection the cursor's row picks: `last_files`' row `row`, or nil when
---- the rows are gone. What the pane renders — the file whose name the block
---- lands on.
-local function row_file(row)
-  local files = last_files
-  return files and files[row] or nil
-end
-
---- Render the selected file's diff in the right-side pane. Rows carry the
---- repo-RELATIVE path (numstat's spelling), which the pane takes directly.
-local function select_pane(file)
-  if not file then return end
-  diff_view.show(file.path, panel_root)
 end
 
 --- j/k: move the panel cursor. The panel is read-only; these are the only
