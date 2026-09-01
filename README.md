@@ -32,6 +32,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | ------ | ------------- | ------------------------------------------------------------------- |
 | `<C-a>` | `n`, `t`     | Create a new Claude Code session and open it on the right           |
 | `<C-s>` | `n`, `t`     | No session displayed → show the last closed one; else switch to the next session |
+| `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (focuses the panel, wraps back to the first) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
 
 ## Session panel
@@ -66,7 +67,11 @@ a diff panel is split above the session panel (below nvim-tree): one three-line
 entry per changed file — the basename, the `+`/`-` counts with a proportional
 bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
 (or `<Down>/<Up>`) move the cursor; the file under it draws the selection
-block. Moving onto a file (explicit `j/k` — not the panel's opening) is what
+block. `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
+and selects the next changed file, starting at the first when nothing is
+selected yet and wrapping back to the first past the last, so the review loop
+runs from anywhere (the session terminal included). Moving onto a file
+(an explicit `j/k` or a `<C-e>` — not the panel's opening) is what
 **renders its working-tree-vs-HEAD diff in a right-side pane via
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
 GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style

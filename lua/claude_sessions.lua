@@ -15,6 +15,8 @@
 -- Keymaps:
 --   <C-a>  create a new session and open it on the right
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
+--   <C-e>  select the next changed file in the diff panel (focuses the
+--          panel and wraps — the diff review loop from any window)
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}
@@ -682,6 +684,8 @@ function M.setup(user_opts)
     { noremap = true, silent = true, desc = 'New Claude Code session' })
   vim.keymap.set({ 'n', 't' }, '<C-s>', function() M.next_session() end,
     { noremap = true, silent = true, desc = 'Switch Claude Code session' })
+  vim.keymap.set({ 'n', 't' }, '<C-e>', function() diff.step_next() end,
+    { noremap = true, silent = true, desc = 'Next changed file (diff panel)' })
   vim.keymap.set('t', '<C-d>', function() M.close_current() end,
     { noremap = true, silent = true, desc = 'Close Claude Code session' })
 
