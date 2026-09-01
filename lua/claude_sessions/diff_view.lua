@@ -1,8 +1,8 @@
--- The right-side diff pane: when the sidebar diff panel selects a file (j/k,
--- or the first row when the panel opens), the file's working-tree-vs-HEAD diff
--- is rendered here via diffview.nvim's engine — the same GitHub-style unified
--- view the review shows (full-file, word-diffed, treesitter-lifted, gitsigns
--- gutter bars, hunk navigation).
+-- The right-side diff pane: when the sidebar diff panel selects a file (an
+-- explicit j/k — the panel's opening never selects), the file's
+-- working-tree-vs-HEAD diff is rendered here via diffview.nvim's engine — the
+-- same GitHub-style unified view the review shows (full-file, word-diffed,
+-- treesitter-lifted, gitsigns gutter bars, hunk navigation).
 --
 -- The adapter owns only the plumbing around the engine: resolve the HEAD and
 -- working copies, build the view rows, paint them into a scratch buffer, and

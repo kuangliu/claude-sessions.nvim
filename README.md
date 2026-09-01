@@ -66,7 +66,8 @@ a diff panel is split above the session panel (below nvim-tree): one three-line
 entry per changed file — the basename, the `+`/`-` counts with a proportional
 bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
 (or `<Down>/<Up>`) move the cursor; the file under it draws the selection
-block and **its working-tree-vs-HEAD diff is rendered in a right-side pane via
+block. Moving onto a file (explicit `j/k` — not the panel's opening) is what
+**renders its working-tree-vs-HEAD diff in a right-side pane via
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
 GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style
 gutter bars, `]]`/`[[` jump hunks, `<CR>` opens the source file, `q` closes

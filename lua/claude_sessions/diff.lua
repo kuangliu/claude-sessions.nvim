@@ -27,12 +27,12 @@
 -- j/k move the cursor onto an entry's name line, with the block landing
 -- there in the same keystroke — and the file just landed on renders its
 -- working-tree-vs-HEAD diff in a right-side pane (claude_sessions/diff_view.lua,
--- via diffview.nvim's engine; the panel opens with its first file selected).
+-- via diffview.nvim's engine; a selection lands only on an explicit j/k).
 
--- The right-side diff pane (claude_sessions/diff_view.lua): a panel
--- selection — j/k, or the panel's first row when it opens — renders that
--- file's working-tree-vs-HEAD diff there via diffview.nvim's engine. Soft
--- dependency: without diffview the selection just moves the panel block.
+-- The right-side diff pane (claude_sessions/diff_view.lua): an explicit j/k
+-- selection renders that file's working-tree-vs-HEAD diff there via
+-- diffview.nvim's engine. Soft dependency: without diffview the selection just
+-- moves the panel block. The panel's opening never selects — no j, no pane.
 local diff_view = require('claude_sessions.diff_view')
 
 local U = require('claude_sessions.util')
@@ -59,11 +59,6 @@ local BAR_SCALE = 100
 local BAR_BLOCKS = 12 -- blocks in a full-width bar
 
 local in_flight = false -- a refresh's two probes are running; don't queue more
-
--- A selection queued for the pane's FIRST render (open_split): the rows land
--- through refresh()'s join, so the selection fires there — one file, then the
--- flag drops (a later refresh never steals the pane back).
-local pending_selection = false
 
 -- The repo root the panel was opened for: private state of the last open()
 -- (a module local, not a field on M — the callers of refresh spell no root).
@@ -426,14 +421,6 @@ function M.refresh()
     -- re-running the two git probes (a focus flip must not pay for two jobs).
     last_files = files
     render(files)
-    -- The pane keeps whatever it showed (the user's context) across refreshes;
-    -- an empty one — the rows the pane never rendered — selects the first
-    -- file. open_split() queued a selection: it lands HERE, not in open_split
-    -- itself, because the rows only exist once this join's probes land.
-    if pending_selection then
-      pending_selection = false
-      select_pane(files[1])
-    end
   end
   fetch_numstat(root, function(rows)
     files = rows or {}
@@ -462,7 +449,6 @@ function M.close()
   last_text, last_row = nil, nil -- the next open() renders into a fresh buffer
   last_files = nil -- focus_panel's repaint has no rows to re-render either
   panel_root = nil -- the next open() re-learns the root from its own lookup
-  pending_selection = false -- a queued first-selection has no rows to land on
   diff_view.close() -- the right-side pane dies with the panel (its context went away)
 end
 
@@ -527,7 +513,6 @@ local function open_split(root, tw)
   M.buf, M.win = buf, win
   panel_root = root
   opening = false -- the split landed: M.win is set, active() reads true
-  pending_selection = true -- the first render selects row 1 (its diff lands in the pane)
   M.refresh()
 
   -- The window can also go away on its own; forget it so the next open()
