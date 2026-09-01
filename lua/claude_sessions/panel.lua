@@ -473,10 +473,14 @@ function M.refresh()
   local line = vim.api.nvim_win_get_cursor(M.win)[1]
   render(M.buf, snap, arrow_row)
   -- Keep the cursor on a SYMBOL line: clamp to the list (the last entry's
-  -- symbol line — util's mapping, not a raw `3n-1`), then snap back to the
-  -- same entry's symbol line (a raw clamp can land on a state-word or
-  -- separator line).
-  line = math.min(math.max(line, 1), math.max(U.entry_line(#snap) - 1, 1))
+  -- symbol line — util's mapping, spelled entry_line(#snap); the raw `3n-2`
+  -- it replaces), then snap back to the same entry's symbol line (a raw
+  -- clamp can land on a state-word or separator line). One line SHORT of it
+  -- (`- 1`) is what broke j/k for months: a cursor on the last entry's
+  -- symbol line clamped to the separator above and snapped to entry n-1 —
+  -- with two sessions every refresh yanked the cursor back to entry 1, so
+  -- the list would not step at all.
+  line = math.min(math.max(line, 1), U.entry_line(#snap))
   pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(line_entry(line)), 0 })
   -- No step in flight: rest the cursor on the displayed session's entry so it
   -- never sits beside an unhighlighted row (the stray block on the left).
