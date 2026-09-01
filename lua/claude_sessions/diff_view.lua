@@ -16,6 +16,10 @@ local M = {}
 
 M.win = nil
 M.buf = nil
+-- The render-in-flight flag (set/cleared by M.show): the diff panel's focus
+-- passes read it and stand down — see the close pass's gate and M.show's gate
+-- comment.
+M.busy = false
 
 -- Soft dependency: the engine modules, or nil when diffview.nvim is not
 -- installed. Resolved once; every entry gates on it.
@@ -187,6 +191,14 @@ end
 --- across calls, so stepping files re-renders in place.
 function M.show(abspath, root)
   if not (engine() and abspath and root) then return end
+  -- The render flips focus twice (the host split moves to the terminal and
+  -- hands it back): the diff panel's focus-flip pass sees those as arrivals/
+  -- departures — a departure spelled DURING a render would close the pane the
+  -- render is about to fill, and the flip-back's arrival would re-render it,
+  -- arriving/departing forever. One flag stands between them: the panel's
+  -- close pass reads busy and stands down (the render's own flip-back is the
+  -- settled state, not a departure).
+  M.busy = true
   local toplevel = root
   local rel = git.relpath(toplevel, abspath)
 
@@ -213,8 +225,11 @@ function M.show(abspath, root)
   show_window(buf)
 
   -- Land the cursor on the first change (the header's end runs into it), so
-  -- the pane opens on the file's edits rather than its top.
+  -- the pane opens on the file's edits rather than its top. The flag clears
+  -- here — the ONE pass after show_window's own focus flip-back, so the
+  -- panel's focus passes see the render's switches as behind them.
   vim.schedule(function()
+    M.busy = false
     if not (U.valid_win(M.win) and U.valid_buf(buf)) then return end
     local rows2 = vim.b[buf].diffview_rows
     local off2 = vim.b[buf].diffview_offset or 0

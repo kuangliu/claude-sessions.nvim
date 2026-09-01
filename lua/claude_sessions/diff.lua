@@ -365,9 +365,18 @@ local function focus_panel()
     render(last_files)
     -- Focus settled ON the panel: the entry under the cursor is the selection
     -- the block just drew — its diff lands in the right-side pane in the same
-    -- flip. Focus left: cursor_row's gate nils it — a no-op, and the pane
-    -- keeps whatever it showed (leaving is not closing).
-    select_pane(row_file(cursor_row()))
+    -- flip. Focus left: the pane's selection went away — close it, so its
+    -- lifetime mirrors the panel's (shown by arrival, closed by departure) —
+    -- UNLESS a render is in flight: the pane's host split flips focus to the
+    -- terminal and back, and that flip-back is not a departure (see diff_view's
+    -- busy flag) — standing down here is what keeps the flip pair from
+    -- closing/re-rendering the pane forever.
+    local file = row_file(cursor_row())
+    if file then
+      select_pane(file)
+    elseif not diff_view.busy then
+      diff_view.close()
+    end
   end)
 end
 
