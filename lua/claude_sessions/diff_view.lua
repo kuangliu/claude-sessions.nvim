@@ -6,9 +6,13 @@
 --
 -- The adapter owns only the plumbing around the engine: resolve the HEAD and
 -- working copies, build the view rows, paint them into a scratch buffer, and
--- place that buffer in a vsplit on the right (next to the session terminal,
--- which owns the right side). diffview stays a soft dependency: with it absent
--- show() is a no-op and the panel behaves exactly as before.
+-- show it diffview-style — the pane TAKES OVER the editor window: the user's
+-- file steps aside (buffer, cursor and window options remembered), the diff
+-- renders at the editor's own full width, and when the pane exits the file
+-- comes back exactly as it left. Only when no editor window exists (nothing
+-- on screen but the sessions layout) does the pane fall back to a vsplit
+-- beside the session terminal. diffview stays a soft dependency: with it
+-- absent show() is a no-op and the panel behaves exactly as before.
 
 local U = require('claude_sessions.util')
 
@@ -16,6 +20,10 @@ local M = {}
 
 M.win = nil
 M.buf = nil
+-- The editor window the pane took over, as { buf, cursor, opts } — what the
+-- take-over found there and what restore hands back. Nil when the pane lives
+-- in its own split (no editor window was on screen to take over).
+M.replaced = nil
 -- The render-in-flight flag (set/cleared by M.show): the diff panel's focus
 -- passes read it and stand down — see the close pass's gate and M.show's gate
 -- comment.
@@ -126,6 +134,18 @@ local function set_keymaps(buf)
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open source' })
 end
 
+-- The window options the pane's plain look owns, spelled in the SAME order
+-- plain_diff_window writes them: a take-over captures these off the editor
+-- window before the look lands and restore writes them back, so the pane's
+-- look never leaks onto the user's window (the split path's windows die with
+-- the pane — only the take-over's lives on as the user's). Global-local opts
+-- (number/wrap/...) restore as a local pin of the captured effective value —
+-- behaviorally the same window.
+local PANE_OPTS = {
+  'number', 'relativenumber', 'signcolumn', 'foldcolumn',
+  'wrap', 'cursorline', 'cursorcolumn', 'statuscolumn',
+}
+
 -- Pane window look: the diff is plain text like the sidebar panels (nothing
 -- decorates its edges), no numbers — the header row carries the counts.
 local function plain_diff_window(win)
@@ -139,48 +159,135 @@ local function plain_diff_window(win)
   vim.wo[win].statuscolumn = ''
 end
 
+-- Filetypes the take-over never touches — the sessions layout's own windows
+-- (the tree, the two panels, the session terminals; the panels are nofile
+-- scratch anyway, the terminals buftype=terminal — both already fail the
+-- normal-buffer gate below, the tree and any diffview view are spelled out).
+local RESERVED_FTS = {
+  NvimTree = true,
+  toggleterm = true,
+  claude = true,
+  ['claude-sessions-panel'] = true,
+  ['claude-sessions-diff'] = true,
+  diffview = true,
+}
+
+--- The editor window the pane takes over: a real (non-floating) window whose
+--- buffer is a NORMAL one — no terminal, no qf/help, nothing of the sessions
+--- layout — and not the pane's own buffer. The LARGEST such window wins: the
+--- main editor area, when several code windows share the row. Floating and
+--- external windows are someone else's UI (a picker, a menu) — never touched,
+--- never counted. Nil when the screen holds nothing but the sessions layout.
+local function editor_window()
+  local best, best_area = nil, -1
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local ok, cfg = pcall(vim.api.nvim_win_get_config, w)
+    if ok and cfg and (cfg.relative or '') == '' and not cfg.external then
+      local b = vim.api.nvim_win_get_buf(w)
+      if U.valid_buf(b) and vim.bo[b].buftype == ''
+          and not RESERVED_FTS[vim.bo[b].filetype] and b ~= M.buf then
+        local area = vim.api.nvim_win_get_width(w) * vim.api.nvim_win_get_height(w)
+        if area > best_area then best, best_area = w, area end
+      end
+    end
+  end
+  return best
+end
+
+--- Hand the taken-over editor window back: the pane's window options come
+--- off, the user's buffer and cursor return. `win` invalid (a manual :close
+--- took the window with the diff still in it): open the buffer in a fresh
+--- split instead — anchored on the tree when there is one, the pane's home
+--- territory — so the restore holds whatever way the pane ended. Clears
+--- M.replaced either way; a no-op when nothing was taken over.
+local function restore_replaced(win)
+  local saved = M.replaced
+  M.replaced = nil
+  if not (saved and U.valid_buf(saved.buf)) then return end
+  if not U.valid_win(win) then
+    local tw = U.tree_window()
+    if tw then pcall(vim.api.nvim_set_current_win, tw) end
+    pcall(vim.cmd, 'vsplit')
+    win = vim.api.nvim_get_current_win()
+  end
+  for _, opt in ipairs(PANE_OPTS) do
+    pcall(function() vim.wo[win][opt] = saved.opts[opt] end)
+  end
+  vim.api.nvim_win_set_buf(win, saved.buf)
+  pcall(vim.api.nvim_win_set_cursor, win, saved.cursor)
+end
+
 --- Show the pane buffer's window: reuse the pane's own window when it is
---- still up, else split one off the session terminal's window (the right
---- side is the terminal's — the pane splits it in place, keeping the layout
---- the sessions plugin owns), else plain vsplit. Seeded at the terminal's own
---- width (`columns * 0.4`, the sessions config's vertical size), so the pane
---- and the terminal read as one pair.
+--- still up; else TAKE OVER an editor window (the user's file steps aside —
+--- buffer, cursor and window options remembered in M.replaced; restore is
+--- M.close's / WinClosed's job); else — nothing but the sessions layout on
+--- screen — split one off the session terminal's window (the right side is
+--- the terminal's — the pane splits it in place, keeping the layout the
+--- sessions plugin owns), seeded at the terminal's own width
+--- (`columns * 0.4`, the sessions config's vertical size), so the pane and
+--- the terminal read as one pair.
 local function show_window(buf)
   if active() then
     vim.api.nvim_win_set_buf(M.win, buf)
     return
   end
-  -- Host for the split: a displayed session window keeps the pane beside the
-  -- terminal — BETWEEN the tree and the terminal (tree → pane → terminal, the
-  -- sidebar's file list reading straight into its diff), not the far right
-  -- the global `splitright` would put it. `splitright = false` while the
-  -- split lands puts the pane on the terminal's left; the one-split flip is
-  -- restored before anything else can read it. No session on screen: plain
-  -- vsplit from where we are.
-  local host = U.window_with_filetype('claude')
-  local prev = vim.api.nvim_get_current_win()
-  if host then
-    pcall(vim.api.nvim_set_current_win, host)
-  end
-  -- Seed the width like the terminal's own: `columns * 0.4` (the sessions
-  -- config's vertical size), so the pane and the terminal read as one pair.
-  local splitright = vim.o.splitright
-  vim.o.splitright = false
-  vim.cmd('40vsplit')
-  vim.o.splitright = splitright
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(win, buf)
-  plain_diff_window(win)
-  vim.cmd('vertical resize ' .. math.max(20, math.floor(vim.o.columns * 0.4)))
-  vim.api.nvim_win_set_cursor(win, { 1, 0 })
-  if host then
-    pcall(U.focus, prev) -- hand focus back to whoever held it
+  local win
+  local editor = editor_window()
+  if editor then
+    -- The take-over: capture what the window holds, then swap the diff in.
+    -- No split, no resize, no focus flip — the sidebar's thirds and the
+    -- terminal's pinned width are untouched, and the render's focus dance
+    -- (M.show's busy flag) simply has nothing to gate here.
+    local opts = {}
+    for _, opt in ipairs(PANE_OPTS) do
+      opts[opt] = vim.wo[editor][opt]
+    end
+    M.replaced = {
+      buf = vim.api.nvim_win_get_buf(editor),
+      cursor = vim.api.nvim_win_get_cursor(editor),
+      opts = opts,
+    }
+    vim.api.nvim_win_set_buf(editor, buf)
+    plain_diff_window(editor)
+    vim.api.nvim_win_set_cursor(editor, { 1, 0 })
+    win = editor
+  else
+    -- Host for the split: a displayed session window keeps the pane beside the
+    -- terminal — BETWEEN the tree and the terminal (tree → pane → terminal, the
+    -- sidebar's file list reading straight into its diff), not the far right
+    -- the global `splitright` would put it. `splitright = false` while the
+    -- split lands puts the pane on the terminal's left; the one-split flip is
+    -- restored before anything else can read it. No session on screen: plain
+    -- vsplit from where we are.
+    local host = U.window_with_filetype('claude')
+    local prev = vim.api.nvim_get_current_win()
+    if host then
+      pcall(vim.api.nvim_set_current_win, host)
+    end
+    -- Seed the width like the terminal's own: `columns * 0.4` (the sessions
+    -- config's vertical size), so the pane and the terminal read as one pair.
+    local splitright = vim.o.splitright
+    vim.o.splitright = false
+    vim.cmd('40vsplit')
+    vim.o.splitright = splitright
+    win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(win, buf)
+    plain_diff_window(win)
+    vim.cmd('vertical resize ' .. math.max(20, math.floor(vim.o.columns * 0.4)))
+    vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    if host then
+      pcall(U.focus, prev) -- hand focus back to whoever held it
+    end
   end
   -- The pane can go away on its own (a layout edit, q's own close); forget it
-  -- so the next show() rebuilds cleanly.
+  -- so the next show() rebuilds cleanly. A take-over dying this way takes the
+  -- user's window with it — restore hands the file a fresh home right here.
   vim.api.nvim_create_autocmd('WinClosed', {
     buffer = buf,
-    callback = function() M.win = nil end,
+    callback = function()
+      M.win = nil
+      if M.replaced then restore_replaced(nil) end
+    end,
   })
   M.win = win
 end
@@ -191,13 +298,14 @@ end
 --- across calls, so stepping files re-renders in place.
 function M.show(abspath, root)
   if not (engine() and abspath and root) then return end
-  -- The render flips focus twice (the host split moves to the terminal and
-  -- hands it back): the diff panel's focus-flip pass sees those as arrivals/
-  -- departures — a departure spelled DURING a render would close the pane the
-  -- render is about to fill, and the flip-back's arrival would re-render it,
-  -- arriving/departing forever. One flag stands between them: the panel's
-  -- close pass reads busy and stands down (the render's own flip-back is the
-  -- settled state, not a departure).
+  -- The render can flip focus twice (the split path's host move to the
+  -- terminal and hand-back; the take-over path flips none and the flag simply
+  -- gates nothing there): the diff panel's focus-flip pass sees those as
+  -- arrivals/departures — a departure spelled DURING a render would close the
+  -- pane the render is about to fill, and the flip-back's arrival would
+  -- re-render it, arriving/departing forever. One flag stands between them:
+  -- the panel's close pass reads busy and stands down (the render's own
+  -- flip-back is the settled state, not a departure).
   M.busy = true
   local toplevel = root
   local rel = git.relpath(toplevel, abspath)
@@ -244,9 +352,18 @@ function M.show(abspath, root)
 end
 
 --- Tear the pane down (window + buffer). The sidebar panels are untouched.
+--- A taken-over editor window is NOT closed — it is the user's window: its
+--- buffer, cursor and window options go back the way the take-over found
+--- them, and only the pane's scratch buffer dies.
 function M.close()
   if active() then
-    pcall(vim.api.nvim_win_close, M.win, true)
+    if M.replaced then
+      restore_replaced(M.win)
+    else
+      pcall(vim.api.nvim_win_close, M.win, true)
+    end
+  elseif M.replaced then
+    restore_replaced(nil) -- belt: the WinClosed pass above normally got here first
   end
   if U.valid_buf(M.buf) then
     vim.api.nvim_buf_delete(M.buf, { force = true })

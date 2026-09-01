@@ -72,11 +72,14 @@ and selects a changed file: pressed from anywhere else the review RESTARTS at
 the first file; pressed while the panel holds focus it advances to the next
 (wrapping back past the last). Moving onto a file
 (an explicit `j/k` or a `<C-e>` — not the panel's opening) is what
-**renders its working-tree-vs-HEAD diff in a right-side pane via
+**renders its working-tree-vs-HEAD diff via
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
 GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style
 gutter bars, `]]`/`[[` jump hunks, `<CR>` opens the source file, `q` closes
-the pane). Soft dependency: without diffview installed the panel still tracks
+the pane). The diff takes over the editor window: your file steps aside
+(cursor and window options remembered) and comes back when the pane exits;
+with nothing but the sessions layout on screen the pane splits beside the
+terminal instead. Soft dependency: without diffview installed the panel still tracks
 changes and moves the selection — just with no right-side diff.
 
 ## Auto-reload
