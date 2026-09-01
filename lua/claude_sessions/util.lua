@@ -15,13 +15,29 @@ function U.valid_buf(buf)
   return buf ~= nil and vim.api.nvim_buf_is_valid(buf)
 end
 
---- Focus a window, if it is still there; `fallback` when it is not.
+--- Focus a window, if it is still there; `fallback` when it is not. Returns
+--- whether focus landed on `win` — callers that must confirm the move (a
+--- selection licensed by focus) re-check nothing.
 function U.focus(win, fallback)
-  if U.valid_win(win) then
-    pcall(vim.api.nvim_set_current_win, win)
+  if U.valid_win(win) and pcall(vim.api.nvim_set_current_win, win) then
+    return vim.api.nvim_get_current_win() == win
   elseif fallback then
     pcall(vim.api.nvim_set_current_win, fallback)
   end
+  return false
+end
+
+--- The current tab's real windows: non-floating, non-external — a floating
+--- picker or external UI is someone else's UI, never a layout candidate.
+function U.real_windows()
+  local wins = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local ok, cfg = pcall(vim.api.nvim_win_get_config, w)
+    if ok and cfg and (cfg.relative or '') == '' and not cfg.external then
+      wins[#wins + 1] = w
+    end
+  end
+  return wins
 end
 
 --- The window currently showing a buffer of filetype `ft`, or nil. Current
@@ -34,10 +50,23 @@ function U.window_with_filetype(ft)
   end
 end
 
+--- Pin `opts` ({ name = value, ... }) as window-local options on `win`.
+function U.apply_winopts(win, opts)
+  for opt, val in pairs(opts) do
+    vim.wo[win][opt] = val
+  end
+end
+
 --- The window currently showing nvim-tree's buffer, or nil. Both panels split
 --- from it (they anchor below it).
 function U.tree_window()
   return U.window_with_filetype('NvimTree')
+end
+
+--- The plugin's notify convention: `msg` under the 'claude sessions' title,
+--- at `level` (INFO when none). One spelling, so the title lives here.
+function U.notify(msg, level)
+  vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
 end
 
 --- Run `args` on a job and hand its stdout (joined, one row per output line)
@@ -120,11 +149,16 @@ local PLAIN_TEXT = {
   cursorline = false, -- the selected entry is highlighted by render() instead
 }
 
---- Apply the plain look to a freshly split panel window.
+--- The plain-text look, with `overrides` merged over (a fresh table either
+--- way) — the table a module spells its whole look from: apply it, and
+--- capture/restore its keys around anything that rewrites the look.
+function U.plain_look(overrides)
+  return vim.tbl_extend('force', PLAIN_TEXT, overrides or {})
+end
+
+--- Apply the plain-text look to a freshly split panel window.
 function U.plain_text_window(win)
-  for opt, val in pairs(PLAIN_TEXT) do
-    vim.wo[win][opt] = val
-  end
+  U.apply_winopts(win, PLAIN_TEXT)
 end
 
 --- Calibrate the sidebar stack (the tree + the panels split below it) to

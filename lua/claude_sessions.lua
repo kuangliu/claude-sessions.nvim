@@ -45,13 +45,13 @@ local last_closed = nil
 
 -- --- Small helpers ----------------------------------------------------------
 
-local function notify(msg, level)
-  vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
-end
-
 --- Focus a window, if it is still there. util's helper — the fallback-less
 --- spelling of the same pcall'd focus the panels' reclaim uses.
 local focus = U.focus
+
+--- The plugin's notify convention (util's shared helper — the title lives
+--- there, and the panels spell it too).
+local notify = U.notify
 
 -- --- Poll loop -------------------------------------------------------------
 -- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS and drives two

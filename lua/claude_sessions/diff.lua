@@ -26,10 +26,10 @@
 -- clears the moment focus moves away (WinLeave's repaint — focus_panel).
 -- j/k move the cursor onto an entry's name line, with the block landing
 -- there in the same keystroke — and the file just landed on renders its
--- working-tree-vs-HEAD diff in a right-side pane (claude_sessions/diff_view.lua,
--- via diffview.nvim's engine; a selection lands only on an explicit j/k).
+-- working-tree-vs-HEAD diff in the pane (claude_sessions/diff_view.lua,
+-- via diffview.nvim's engine; a selection lands on an explicit j/k or <C-e>).
 
--- The right-side diff pane (claude_sessions/diff_view.lua): an explicit j/k
+-- The diff pane (claude_sessions/diff_view.lua): an explicit j/k or <C-e>
 -- selection renders that file's working-tree-vs-HEAD diff there via
 -- diffview.nvim's engine. Soft dependency: without diffview the selection just
 -- moves the panel block. The panel's opening never selects — no j, no pane.
@@ -302,8 +302,8 @@ local function row_file(row)
   return files and files[row] or nil
 end
 
---- Render the selected file's diff in the right-side pane. Rows carry the
---- repo-RELATIVE path (numstat's spelling), which the pane takes directly.
+--- Render the selected file's diff in the pane. Rows carry the repo-RELATIVE
+--- path (numstat's spelling), which the pane takes directly.
 local function select_pane(file)
   if not file then return end
   diff_view.show(file.path, panel_root)
@@ -311,13 +311,18 @@ end
 
 --- Land the selection on entry `row`: the cursor onto its NAME line, the
 --- repaint (the block draws there in the same keystroke), and the file's diff
---- in the right-side pane. One spelling of "this entry is now the selection"
---- for both the j/k move and <C-e>'s begin/step.
+--- in the pane. One spelling of "this entry is now the selection" for both
+--- the j/k move and <C-e>'s begin/step.
 local function land(row)
   pcall(vim.api.nvim_win_set_cursor, M.win, { U.entry_line(row), 0 })
-  M.refresh()
+  -- The block lands through the zero-job repaint (the remembered rows — the
+  -- exact repaint the focus-flip pass uses), not the two-probe refresh: a
+  -- keystroke spawns no git jobs, and row freshness stays with the poll
+  -- cadence (per tick while an agent works, slow-cycle otherwise). No rows
+  -- fetched yet: the block arrives with the poll tick's first render.
+  if last_files then render(last_files) end
   -- The file the cursor just landed on IS the selection: its diff renders in
-  -- the right-side pane in the same keystroke (a no-op without diffview).
+  -- the pane in the same keystroke (a no-op without diffview).
   select_pane(row_file(row))
 end
 
@@ -327,9 +332,7 @@ end
 --- (j) or last (k). The move lands on the entry's NAME line (the block's top
 --- row — the same rule the session panel's step applies) and the block draws
 --- there in the same keystroke: the block follows the raw cursor, so moving
---- the cursor IS the selection. The repaint lands through the panel's OWN
---- refresh (the two git probes), not the poll loop's cadence — a j/k must not
---- wait for the next tick to draw the block.
+--- the cursor IS the selection.
 local function move_cursor(d, wrap)
   if not M.active() then return end
   local n = U.entry_count(vim.api.nvim_buf_line_count(M.buf))
@@ -340,7 +343,7 @@ local function move_cursor(d, wrap)
   else
     row = row + d
     if wrap then
-      row = row > n and 1 or (row < 1 and n or row)
+      row = row > n and 1 or row -- cycle forward past the end
     else
       row = math.min(math.max(row, 1), n)
     end
@@ -363,19 +366,16 @@ end
 --- sessions.
 function M.step_next()
   if not M.active() then
-    vim.notify('No diff panel: nothing to step through.',
-      vim.log.levels.WARN, { title = 'claude sessions' })
+    U.notify('No diff panel: nothing to step through.', vim.log.levels.WARN)
     return
   end
-  local n = U.entry_count(vim.api.nvim_buf_line_count(M.buf))
-  if n == 0 then return end
   if vim.api.nvim_get_current_win() ~= M.win then
-    pcall(vim.api.nvim_set_current_win, M.win)
     -- The focus move is what licenses the selection; a refused one (the panel
     -- window vanished mid-keypress) leaves nothing to select.
-    if vim.api.nvim_get_current_win() ~= M.win then return end
+    if not U.focus(M.win) then return end
     -- The review restarts: every press from outside the panel begins the
-    -- sweep at the first file.
+    -- sweep at the first file (an empty list has nothing to land on).
+    if U.entry_count(vim.api.nvim_buf_line_count(M.buf)) == 0 then return end
     land(1)
     return
   end
