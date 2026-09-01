@@ -20,6 +20,7 @@
 local M = {}
 
 local panel = require('claude_sessions.panel')
+local diff = require('claude_sessions.diff')
 
 -- --- Options --------------------------------------------------------------
 -- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
@@ -172,6 +173,21 @@ local function poll_tick()
   end
   -- Panel mode guard's periodic check (see panel.install_mode_guard).
   vim.cmd('doautocmd User ClaudeSessionsTick')
+  -- An agent actively working is the usual reason the working tree changes,
+  -- so the diff panel tracks it: up → repaint per tick WHILE the agent works
+  -- (the tree can only be changing under its hands — an idle editor's tree is
+  -- static, so refreshing it 3x/sec bought nothing), slow-cycle otherwise;
+  -- down → probe+open on the slow sub-cycle (two git jobs), so a panel that
+  -- was never drawn (a clean workspace at open time) still appears when the
+  -- first change lands — a refresh-only call here would be a permanent no-op
+  -- then.
+  if M.is_visible() then
+    if diff.active() then
+      if any_busy or tick % FETCH_EVERY == 0 then diff.refresh() end
+    elseif tick % FETCH_EVERY == 0 then
+      diff.open()
+    end
+  end
   if tick % FETCH_EVERY == 0 then
     refresh_busy_state()
   end
@@ -265,10 +281,18 @@ end
 -- panel.lua is required at the top; its hooks are bound here, after the
 -- registry helpers they close over (avoids a require cycle).
 
---- Push the registry/window state to the panel: re-render its rows, or close
---- it when nothing is displayed anymore.
+--- Push the registry/window state to both panels: re-render their rows, or
+--- close them when nothing is displayed anymore. The diff panel shadows the
+--- session panel's visibility (its open/close decision is diff.sync's), and
+--- both halves hold the open through a session switch (panel.switching —
+--- panel.sync guards it internally; the diff half guards here, or the churn's
+--- close_all_open_windows → panel_sync initiates a redundant open mid-churn
+--- and show_session's own diff.open() lands as a no-op).
 local function panel_sync()
   panel.sync(M.is_visible())
+  if not panel.switching then
+    diff.sync(M.is_visible())
+  end
 end
 
 --- The panel's rows: live sessions in list order as { busy, state, open, name }.
@@ -381,6 +405,7 @@ show_session = function(s)
   panel.switching = false
   current = s
   panel.open() -- refresh rows (open/closed states flipped)
+  diff.open() -- the uncommitted-changes panel above the tree
 
   if stepping then
     -- Focus: the just-opened terminal keeps it for THIS event-loop pass. The
@@ -509,6 +534,7 @@ function M.close_current(target, close_opts)
     -- session's.
     require('toggleterm.ui').hl_term(next_session.term)
     panel.open()
+    diff.refresh()
     if not stepping then
       vim.api.nvim_set_current_win(win)
       vim.cmd('startinsert')
@@ -703,6 +729,14 @@ function M.setup(user_opts)
   })
 
   panel.setup()
+  diff.setup()
+
+  -- The diff panel needs a tree window to split above; the tree closing (or
+  -- the last displayed session closing) takes the diff panel with it.
+  vim.api.nvim_create_autocmd('FileType', {
+    pattern = 'NvimTree',
+    callback = function() diff.sync(M.is_visible()) end,
+  })
 end
 
 return M

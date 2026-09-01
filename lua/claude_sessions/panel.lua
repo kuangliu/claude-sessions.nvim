@@ -17,6 +17,8 @@
 
 local M = {}
 
+local U = require('claude_sessions.util') -- shared window/buffer helpers
+
 -- Bound by the main module: `snapshot()` returns the live sessions as an
 -- array of { busy = bool, open = bool, name = string? } (array index ==
 -- session number), `show(i)` displays session i, `close_session(i)` kills
@@ -106,14 +108,10 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelCursor', { bg = '#2c313c' })
 end
 
--- The window currently showing nvim-tree's buffer, or nil.
+-- The window currently showing nvim-tree's buffer, or nil. (util's helper —
+-- shared with the diff panel, which looks the same window up.)
 local function tree_window()
-  for _, w in ipairs(vim.api.nvim_list_wins()) do
-    local ok, b = pcall(vim.api.nvim_win_get_buf, w)
-    if ok and vim.bo[b].filetype == 'NvimTree' then
-      return w
-    end
-  end
+  return U.window_with_filetype('NvimTree')
 end
 
 --- Is the panel window (still) up?
@@ -525,14 +523,8 @@ function M.follow()
 end
 
 local function make_panel_buffer()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype = 'nofile'
-  vim.bo[buf].filetype = 'claude-sessions-panel'
-  vim.bo[buf].bufhidden = 'hide'
-  vim.bo[buf].buflisted = false
-  vim.bo[buf].swapfile = false
-  -- No completion popups while typing a rename (blink.cmp reads this var).
-  vim.b[buf].completion = false
+  -- util's scratch helper — the diff panel's render buffer is the same shape.
+  local buf = U.scratch_buffer('claude-sessions-panel')
   return buf
 end
 
@@ -592,18 +584,8 @@ function M.open()
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   -- The split below the tree inherits the tree window's options; the panel is
-  -- plain text — nothing should decorate its edges (a fold/sign/status column
-  -- would draw grey blocks beside the rows).
-  vim.wo[win].number = false
-  vim.wo[win].relativenumber = false
-  vim.wo[win].signcolumn = 'no'
-  vim.wo[win].foldcolumn = '0'
-  vim.wo[win].cursorcolumn = false
-  vim.wo[win].statuscolumn = ''
-  vim.wo[win].wrap = false
-  -- No cursorline: the selected entry is highlighted as a two-line block by
-  -- render() instead (see the Cursor extmark there).
-  vim.wo[win].cursorline = false
+  -- plain text (util's helper — the diff panel applies the same look).
+  U.plain_text_window(win)
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
 
   M.buf, M.win = buf, win
