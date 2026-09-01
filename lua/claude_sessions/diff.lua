@@ -330,23 +330,6 @@ local function move_cursor(d)
   select_pane(row_file(row))
 end
 
---- j/k: move the panel cursor. The panel is read-only; these are the only
---- functional maps on its buffer — the editing keys are silenced first
---- (util's shared list) so these win, and everything else keeps its default.
---- NOT silenced: <C-a> — the global mapping creates a session, and that must
---- work with the cursor on this panel too.
-local function set_keymaps(buf)
-  U.silence_editing_keys(buf)
-  local function map(key, d, desc)
-    vim.keymap.set('n', key, function() move_cursor(d) end,
-      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
-  end
-  map('j', 1, 'next file')
-  map('k', -1, 'previous file')
-  map('<Down>', 1, 'next file')
-  map('<Up>', -1, 'previous file')
-end
-
 --- Repaint the rows through a FOCUS flip: focus arrived (the block lands on
 --- the cursor's entry) or focus left (cursor_row's focus gate nils the
 --- selection, and the unpadded rows clear it). Re-renders the remembered rows
@@ -362,6 +345,11 @@ end
 --- read inside cursor_row is settled — the settled read IS the final state.
 --- A flip queues at most one repaint (the flag), so held-key window sweeps
 --- pay one render, not one per window crossed.
+---
+--- Declared BELOW row_file/select_pane: the settled pass selects the entry
+--- under the cursor, and a focus arrival is a selection the same way a j/k is
+--- — Lua locals aren't visible before their declaration (the j/k keymaps hit
+--- this once already).
 local repaint_scheduled = false
 local function focus_panel()
   -- Gates synchronously, not inside the pass: the autocmds fire per window
@@ -375,7 +363,29 @@ local function focus_panel()
     repaint_scheduled = false
     if not (M.active() and last_files) then return end
     render(last_files)
+    -- Focus settled ON the panel: the entry under the cursor is the selection
+    -- the block just drew — its diff lands in the right-side pane in the same
+    -- flip. Focus left: cursor_row's gate nils it — a no-op, and the pane
+    -- keeps whatever it showed (leaving is not closing).
+    select_pane(row_file(cursor_row()))
   end)
+end
+
+--- j/k: move the panel cursor. The panel is read-only; these are the only
+--- functional maps on its buffer — the editing keys are silenced first
+--- (util's shared list) so these win, and everything else keeps its default.
+--- NOT silenced: <C-a> — the global mapping creates a session, and that must
+--- work with the cursor on this panel too.
+local function set_keymaps(buf)
+  U.silence_editing_keys(buf)
+  local function map(key, d, desc)
+    vim.keymap.set('n', key, function() move_cursor(d) end,
+      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
+  end
+  map('j', 1, 'next file')
+  map('k', -1, 'previous file')
+  map('<Down>', 1, 'next file')
+  map('<Up>', -1, 'previous file')
 end
 
 --- Fetch the current diff and repaint the panel. No-op when the panel is

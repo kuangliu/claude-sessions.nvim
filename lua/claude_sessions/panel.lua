@@ -583,10 +583,20 @@ end
 -- the focused window. Calls from anywhere else pass straight through.
 local function install_mode_guard()
   -- Every hook below shares one predicate: an insert the panel does not want
-  -- — one that lands on the panel buffer while no rename is in flight (a
-  -- rename's own insert is deliberate and passes; see `renaming` above).
+  -- — one that lands on one of the frame's read-only panel buffers while no
+  -- rename is in flight (a rename's own insert is deliberate and passes; see
+  -- `renaming` above). The diff panel (the sidebar's changed-files list) is a
+  -- different buffer with a different filetype — a late toggleterm closure
+  -- spells startinsert on IT too, and the same INSERT flash / E21 lands
+  -- there. Both spellings share the guard.
+  local PANEL_FTS = { 'claude-sessions-panel', 'claude-sessions-diff' }
   local function stray_insert(buf)
-    return vim.bo[buf].filetype == 'claude-sessions-panel' and not renaming
+    if renaming then return false end
+    local ft = vim.bo[buf].filetype
+    for _, panel_ft in ipairs(PANEL_FTS) do
+      if ft == panel_ft then return true end
+    end
+    return false
   end
 
   -- Root interception: the stray call is literally `vim.cmd('startinsert')`
@@ -640,6 +650,14 @@ local function install_mode_guard()
   })
   vim.api.nvim_create_autocmd('InsertLeave', {
     callback = function(ev)
+      -- The rename's own lifecycle (cancel, modifiable restore) is the
+      -- session panel's spelling — the diff panels spell none (they are
+      -- ALWAYS nomodifiable; U.set_rows owns their flips), so their leave
+      -- just restores nomodifiable.
+      if vim.bo[ev.buf].filetype == 'claude-sessions-diff' then
+        vim.bo[ev.buf].modifiable = false
+        return
+      end
       if vim.bo[ev.buf].filetype ~= 'claude-sessions-panel' then return end
       if renaming then
         finish_rename(false) -- insert left without <CR>/<Esc>: cancel
