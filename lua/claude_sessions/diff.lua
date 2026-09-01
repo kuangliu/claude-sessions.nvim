@@ -25,7 +25,15 @@
 -- ClaudeSessionsPanelCursor group) while the panel holds focus, and the block
 -- clears the moment focus moves away (WinLeave's repaint — focus_panel).
 -- j/k move the cursor onto an entry's name line, with the block landing
--- there in the same keystroke.
+-- there in the same keystroke — and the file just landed on renders its
+-- working-tree-vs-HEAD diff in a right-side pane (claude_sessions/diff_view.lua,
+-- via diffview.nvim's engine; the panel opens with its first file selected).
+
+-- The right-side diff pane (claude_sessions/diff_view.lua): a panel
+-- selection — j/k, or the panel's first row when it opens — renders that
+-- file's working-tree-vs-HEAD diff there via diffview.nvim's engine. Soft
+-- dependency: without diffview the selection just moves the panel block.
+local diff_view = require('claude_sessions.diff_view')
 
 local U = require('claude_sessions.util')
 
@@ -51,6 +59,11 @@ local BAR_SCALE = 100
 local BAR_BLOCKS = 12 -- blocks in a full-width bar
 
 local in_flight = false -- a refresh's two probes are running; don't queue more
+
+-- A selection queued for the pane's FIRST render (open_split): the rows land
+-- through refresh()'s join, so the selection fires there — one file, then the
+-- flag drops (a later refresh never steals the pane back).
+local pending_selection = false
 
 -- The repo root the panel was opened for: private state of the last open()
 -- (a module local, not a field on M — the callers of refresh spell no root).
@@ -302,6 +315,24 @@ local function move_cursor(d)
   row = row == nil and (d > 0 and 1 or n) or math.min(math.max(row + d, 1), n)
   pcall(vim.api.nvim_win_set_cursor, M.win, { U.entry_line(row), 0 })
   M.refresh()
+  -- The file the cursor just landed on IS the selection: its diff renders in
+  -- the right-side pane in the same keystroke (a no-op without diffview).
+  select_pane(row_file(row))
+end
+
+--- The selection the cursor's row picks: `last_files`' row `row`, or nil when
+--- the rows are gone. What the pane renders — the file whose name the block
+--- lands on.
+local function row_file(row)
+  local files = last_files
+  return files and files[row] or nil
+end
+
+--- Render the selected file's diff in the right-side pane. Rows carry the
+--- repo-RELATIVE path (numstat's spelling), which the pane takes directly.
+local function select_pane(file)
+  if not file then return end
+  diff_view.show(file.path, panel_root)
 end
 
 --- j/k: move the panel cursor. The panel is read-only; these are the only
@@ -395,6 +426,14 @@ function M.refresh()
     -- re-running the two git probes (a focus flip must not pay for two jobs).
     last_files = files
     render(files)
+    -- The pane keeps whatever it showed (the user's context) across refreshes;
+    -- an empty one — the rows the pane never rendered — selects the first
+    -- file. open_split() queued a selection: it lands HERE, not in open_split
+    -- itself, because the rows only exist once this join's probes land.
+    if pending_selection then
+      pending_selection = false
+      select_pane(files[1])
+    end
   end
   fetch_numstat(root, function(rows)
     files = rows or {}
@@ -423,6 +462,8 @@ function M.close()
   last_text, last_row = nil, nil -- the next open() renders into a fresh buffer
   last_files = nil -- focus_panel's repaint has no rows to re-render either
   panel_root = nil -- the next open() re-learns the root from its own lookup
+  pending_selection = false -- a queued first-selection has no rows to land on
+  diff_view.close() -- the right-side pane dies with the panel (its context went away)
 end
 
 --- (Re)open the panel below the nvim-tree window and repaint the rows. No-op
@@ -486,6 +527,7 @@ local function open_split(root, tw)
   M.buf, M.win = buf, win
   panel_root = root
   opening = false -- the split landed: M.win is set, active() reads true
+  pending_selection = true -- the first render selects row 1 (its diff lands in the pane)
   M.refresh()
 
   -- The window can also go away on its own; forget it so the next open()

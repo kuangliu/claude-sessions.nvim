@@ -12,6 +12,8 @@ opens via the same right-side split.
 - [toggleterm.nvim](https://github.com/akinsho/toggleterm.nvim) (auto-loaded
   when a session is created)
 - `claude` CLI on `$PATH`
+- [diffview.nvim](https://github.com/kuangliu/diffview.nvim) (optional — the
+  right-side diff pane renders without it as a plain selection-only panel)
 
 ## Installation
 
@@ -56,6 +58,20 @@ it attaches when the tree opens (while a session is displayed), goes away when
 the tree closes (`<Leader>f` toggle, `q` in the tree), and comes back when the
 tree reopens. It also refreshes on create/close/switch, and closes when the
 last displayed session closes.
+
+## Diff panel
+
+While a session window is displayed and the workspace has uncommitted changes,
+a diff panel is split above the session panel (below nvim-tree): one three-line
+entry per changed file — the basename, the `+`/`-` counts with a proportional
+bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
+(or `<Down>/<Up>`) move the cursor; the file under it draws the selection
+block and **its working-tree-vs-HEAD diff is rendered in a right-side pane via
+[diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
+GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style
+gutter bars, `]]`/`[[` jump hunks, `<CR>` opens the source file, `q` closes
+the pane). Soft dependency: without diffview installed the panel still tracks
+changes and moves the selection — just with no right-side diff.
 
 ## Auto-reload
 
