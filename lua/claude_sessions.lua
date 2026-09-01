@@ -21,6 +21,7 @@ local M = {}
 
 local panel = require('claude_sessions.panel')
 local diff = require('claude_sessions.diff')
+local U = require('claude_sessions.util') -- shared window/buffer helpers
 
 -- --- Options --------------------------------------------------------------
 -- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
@@ -46,12 +47,9 @@ local function notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
 end
 
---- Focus a window, if it is still there.
-local function focus(win)
-  if win and vim.api.nvim_win_is_valid(win) then
-    pcall(vim.api.nvim_set_current_win, win)
-  end
-end
+--- Focus a window, if it is still there. util's helper — the fallback-less
+--- spelling of the same pcall'd focus the panels' reclaim uses.
+local focus = U.focus
 
 -- --- Poll loop -------------------------------------------------------------
 -- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS and drives two
@@ -116,7 +114,10 @@ local function update_busy()
 end
 
 --- Async-fetch `claude agents --json` and refresh the pid -> busy cache.
---- Runs the CLI on a job and parses stdout as it arrives (non-blocking).
+--- Runs the CLI on a job (non-blocking) — util's shared job helper lands the
+--- stdout as one string, or nil on a failed spawn (e.g. `claude` not on PATH
+--- when nvim was launched without the shell environment: keep the last known
+--- busy state and retry on the next tick).
 ---
 --- Sessions spawned inside an nvim that itself runs under Claude would inherit
 --- CLAUDE_CODE_CHILD_SESSION and stay hidden from `claude agents`, so create()
@@ -125,30 +126,20 @@ end
 local function refresh_busy_state()
   if fetch_inflight then return end
   fetch_inflight = true
-  local stdout = {}
-  local ok, job_id = pcall(vim.fn.jobstart, { 'claude', 'agents', '--json' }, {
-    stdout_buffered = true,
-    on_stdout = function(_, data) vim.list_extend(stdout, data or {}) end,
-    on_exit = function()
-      fetch_inflight = false
-      local ok, agents = pcall(vim.fn.json_decode, table.concat(stdout, ''))
-      if not ok or type(agents) ~= 'table' then return end
-      local next_map = {}
-      for _, a in ipairs(agents) do
-        if type(a) == 'table' and a.pid and type(a.status) == 'string' then
-          next_map[a.pid] = a.status
-        end
-      end
-      busy_by_pid = next_map
-      update_busy()
-    end,
-  })
-  if not ok or job_id <= 0 then
-    -- e.g. `claude` not on PATH when nvim was launched without the shell
-    -- environment; keep the last known busy state and retry on the next tick
-    -- instead of throwing E475
+  U.job({ 'claude', 'agents', '--json' }, function(out)
     fetch_inflight = false
-  end
+    if not out then return end
+    local ok, agents = pcall(vim.fn.json_decode, out)
+    if not ok or type(agents) ~= 'table' then return end
+    local next_map = {}
+    for _, a in ipairs(agents) do
+      if type(a) == 'table' and a.pid and type(a.status) == 'string' then
+        next_map[a.pid] = a.status
+      end
+    end
+    busy_by_pid = next_map
+    update_busy()
+  end)
 end
 
 --- Stop the poll timer. Called when the last session closes; also resets the
@@ -215,8 +206,7 @@ end
 
 --- Is this terminal's window currently displayed in the UI?
 local function window_open(term)
-  return term.window ~= nil
-    and vim.api.nvim_win_is_valid(term.window)
+  return U.valid_win(term.window)
     and vim.api.nvim_win_get_buf(term.window) == term.bufnr
 end
 
@@ -253,7 +243,7 @@ local function apply_name(s, name)
   local term = s.term
   if not term then return end
   term.display_name = name
-  if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+  if U.valid_buf(term.bufnr) then
     vim.b[term.bufnr].claude_session_name = name
   end
 end
@@ -283,16 +273,17 @@ end
 
 --- Push the registry/window state to both panels: re-render their rows, or
 --- close them when nothing is displayed anymore. The diff panel shadows the
---- session panel's visibility (its open/close decision is diff.sync's), and
---- both halves hold the open through a session switch (panel.switching —
---- panel.sync guards it internally; the diff half guards here, or the churn's
---- close_all_open_windows → panel_sync initiates a redundant open mid-churn
---- and show_session's own diff.open() lands as a no-op).
+--- session panel's visibility (its open/close decision is diff.sync's). The
+--- hold for a session switch lives HERE — one guard, both halves (panel.switching):
+--- panel.sync holds its own open through the churn, and the diff half must too,
+--- or the churn's close_all_open_windows → panel_sync initiates a redundant
+--- open mid-churn (show_session's own diff.open() then lands as a no-op there).
+--- No hold inside diff.sync itself: the panels read each other only through
+--- this module, which binds both — the churn owner's depth is the right one.
 local function panel_sync()
+  if panel.switching then return end -- mid-switch churn: show_session owns both halves
   panel.sync(M.is_visible())
-  if not panel.switching then
-    diff.sync(M.is_visible())
-  end
+  diff.sync(M.is_visible())
 end
 
 --- The panel's rows: live sessions in list order as { busy, state, open, name }.
@@ -397,7 +388,7 @@ show_session = function(s)
     return
   end
 
-  panel.switching = true -- hold the panel open through the window churn
+  panel.switching = true -- hold panel_sync's both halves through the window churn
   without_insert(stepping, function()
     close_all_open_windows(s.term)
     s.term:open()
@@ -432,7 +423,7 @@ local function on_session_exit(record)
     if window_open(term) then
       term:close()
     end
-    if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+    if U.valid_buf(term.bufnr) then
       vim.api.nvim_buf_delete(term.bufnr, { force = true })
     end
   end
@@ -464,7 +455,7 @@ function M.create()
   -- Use a non-toggleterm filetype so lualine's toggleterm extension (matches
   -- ft == 'toggleterm') does not replace the statusline inside sessions.
   -- Toggleterm still tracks the buffer via vim.b.toggle_number.
-  if record.term.bufnr and vim.api.nvim_buf_is_valid(record.term.bufnr) then
+  if U.valid_buf(record.term.bufnr) then
     vim.bo[record.term.bufnr].ft = 'claude'
   end
   renumber() -- names the new session (custom names elsewhere are kept)
@@ -507,7 +498,7 @@ function M.close_current(target, close_opts)
   -- below. close_on_exit = false keeps the job's later exit from closing the
   -- window / moving focus. Deleting the LAST buffer of its window also tears
   -- the window down, so `win` may be invalid afterwards — re-checked below.
-  if term.bufnr and vim.api.nvim_buf_is_valid(term.bufnr) then
+  if U.valid_buf(term.bufnr) then
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
   drop_record(target)
@@ -525,7 +516,7 @@ function M.close_current(target, close_opts)
   -- flickering). Panel-driven: the cursor stays on the panel where the user
   -- closed (rows shifted, refresh clamps it); the terminal takes insert mode
   -- when the user next enters it.
-  if win and vim.api.nvim_win_is_valid(win) then
+  if U.valid_win(win) then
     close_all_open_windows(next_session.term)
     vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
     next_session.term.window = win
