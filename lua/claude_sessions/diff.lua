@@ -309,14 +309,6 @@ local function select_pane(file)
   diff_view.show(file.path, panel_root)
 end
 
--- The entry the panel last put its selection block on: <C-e>'s cycle
--- position. The raw window cursor can't stand in — a fresh panel parks it on
--- entry 1 with NOTHING selected, and "next from the parked row" is what made
--- the first <C-e> land on file two. Recorded by land() and by focus_panel's
--- arrival pass (a focus arrival selects the entry under the cursor, the same
--- way a j/k does); close() clears it, so a reopened panel's cycle starts over.
-local last_selected = nil
-
 --- Land the selection on entry `row`: the cursor onto its NAME line, the
 --- repaint (the block draws there in the same keystroke), and the file's diff
 --- in the right-side pane. One spelling of "this entry is now the selection"
@@ -326,7 +318,6 @@ local function land(row)
   M.refresh()
   -- The file the cursor just landed on IS the selection: its diff renders in
   -- the right-side pane in the same keystroke (a no-op without diffview).
-  last_selected = row
   select_pane(row_file(row))
 end
 
@@ -357,20 +348,19 @@ local function move_cursor(d, wrap)
   land(row)
 end
 
---- <C-e>: the panel's global step — focus the panel and select the NEXT
---- changed file, wrapping past the ends. Pressed from anywhere (the session
---- terminal, a code window), the way <C-s> cycles sessions from anywhere.
---- Focusing the panel first is what makes the move a SELECTION: the block
---- draws only while the panel holds focus (cursor_row's gate), and the pane's
---- lifetime mirrors that focus — moving the cursor from OUTSIDE the panel
---- would land a block nowhere and render a pane the next focus flip closes.
---- "Next" is relative to the current selection — the entry the block sits on
---- (the raw cursor's), wrapped into the live count — but ONLY once a
---- selection exists (last_selected): with none, the cycle BEGINS at the first
---- file. Arriving from the panel itself, the selection is under the cursor
---- and the move_cursor path advances it. Panel down (a clean workspace, no
---- tree, no displayed session): nothing to step — say so, the way <C-s> does
---- with no sessions.
+--- <C-e>: the panel's global step — focus the panel and select a changed
+--- file. Pressed from anywhere (the session terminal, a code window), the
+--- way <C-s> cycles sessions from anywhere. Focusing the panel first is what
+--- makes the move a SELECTION: the block draws only while the panel holds
+--- focus (cursor_row's gate), and the pane's lifetime mirrors that focus —
+--- moving the cursor from OUTSIDE the panel would land a block nowhere and
+--- render a pane the next focus flip closes. From OUTSIDE, the review
+--- RESTARTS at the first file — every terminal round-trip begins the sweep
+--- over, so the key carries no position of its own; from the panel itself,
+--- the selection is under the cursor and the move_cursor path advances it,
+--- wrapping past the last file. Panel down (a clean workspace, no tree, no
+--- displayed session): nothing to step — say so, the way <C-s> does with no
+--- sessions.
 function M.step_next()
   if not M.active() then
     vim.notify('No diff panel: nothing to step through.',
@@ -384,15 +374,9 @@ function M.step_next()
     -- The focus move is what licenses the selection; a refused one (the panel
     -- window vanished mid-keypress) leaves nothing to select.
     if vim.api.nvim_get_current_win() ~= M.win then return end
-    if last_selected then
-      -- The raw cursor is where the block sits (land and the focus arrivals
-      -- keep them together) — read it through the window, wherever the key
-      -- came from, and wrap one past it into the live count.
-      local raw = math.min(math.max(U.line_entry(vim.api.nvim_win_get_cursor(M.win)[1]), 1), n)
-      land(raw % n + 1)
-    else
-      land(1) -- nothing selected yet: the cycle begins at the first file
-    end
+    -- The review restarts: every press from outside the panel begins the
+    -- sweep at the first file.
+    land(1)
     return
   end
   move_cursor(1, true)
@@ -439,13 +423,8 @@ local function focus_panel()
     -- terminal and back, and that flip-back is not a departure (see diff_view's
     -- busy flag) — standing down here is what keeps the flip pair from
     -- closing/re-rendering the pane forever.
-    local row = cursor_row()
-    local file = row_file(row)
+    local file = row_file(cursor_row())
     if file then
-      -- The block just landed on this entry: that IS the selection (block +
-      -- pane render, the same way a j/k lands one) — the <C-e> cycle
-      -- continues from here, not from wherever land() last left it.
-      last_selected = row
       select_pane(file)
     elseif not diff_view.busy then
       diff_view.close()
@@ -541,7 +520,6 @@ function M.close()
   last_text, last_row = nil, nil -- the next open() renders into a fresh buffer
   last_files = nil -- focus_panel's repaint has no rows to re-render either
   panel_root = nil -- the next open() re-learns the root from its own lookup
-  last_selected = nil -- a reopened panel's <C-e> cycle starts over
   diff_view.close() -- the right-side pane dies with the panel (its context went away)
 end
 
