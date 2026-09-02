@@ -80,27 +80,37 @@ function M.active()
   return U.valid_win(M.win)
 end
 
---- The file the panel cursor selects: the window cursor's entry, one-based,
---- or nil (no panel, no rows, or the sweep not started — the flag gates the
---- panel's BIRTH state, whose cursor already rests on entry 1 without a
---- selection behind it). The selection is a PIN, not focus: it holds while
---- the cursor is elsewhere — the review keeps running and the block stays
---- drawn on the pinned entry when the user moves away. Focus matters only as
---- an EVENT, never as a gate: a focus arrival re-selects the entry under the
---- cursor (focus_panel's pass), a departure changes nothing. The rows are
---- three-line groups (name / counts / blank) in the SAME shape the session
---- panel renders, so util's row↔entry helpers apply: any line — a name, a
---- counts row, or the blank below it — attributes to the entry it belongs to
---- (U.line_entry), clamped to the live count (a cursor left on a row the
---- last render dropped must not select past the list).
-local function cursor_row()
-  if not review_started then return nil end
+--- The entry the RAW panel cursor rests on — one-based, clamped to the live
+--- rows — or nil. No sweep gate: the flag-free read the focus ARRIVAL needs,
+--- because the birth state is exactly what an arrival selects (the cursor
+--- rests on entry 1 from birth, or wherever a mouse click put it). The rows
+--- are three-line groups (name / counts / blank) in the SAME shape the
+--- session panel renders, so util's row↔entry helpers apply: any line — a
+--- name, a counts row, or the blank below it — attributes to the entry it
+--- belongs to (U.line_entry), clamped to the live count (a cursor left on a
+--- row the last render dropped must not select past the list). Declared
+--- ABOVE cursor_row, which wraps it in the sweep flag.
+local function raw_cursor_row()
   if not (M.active() and U.valid_buf(M.buf)) then return nil end
   local count = vim.api.nvim_buf_line_count(M.buf)
   if count == 0 then return nil end
   local line = vim.api.nvim_win_get_cursor(M.win)[1]
   return math.min(math.max(U.line_entry(line), 1),
     math.max(U.entry_count(count), 1))
+end
+
+--- The file the panel cursor selects: `raw_cursor_row` behind the sweep flag,
+--- nil until the sweep started. The flag gates the reads that must not CREATE
+--- a selection — render's block (the panel's opening never selects: no j, no
+--- pin, no pane) and a departure's re-show. Creating one is land()'s job
+--- alone, through an explicit j/k / <C-e> or a focus arrival (focus_panel's
+--- pass lands the raw cursor's entry — raw_cursor_row, not this: the birth
+--- state is exactly what an arrival selects). The selection is a PIN, not
+--- focus: it holds while the cursor is elsewhere — the review keeps running
+--- and the block stays drawn on the pinned entry when the user moves away.
+local function cursor_row()
+  if not review_started then return nil end
+  return raw_cursor_row()
 end
 
 --- Run a git command of `root` on a job and hand its stdout (a string) to `cb`
@@ -386,26 +396,31 @@ function M.step_next()
   move_cursor(1, true)
 end
 
---- Repaint the rows through a FOCUS flip: an arrival re-renders the pinned
---- entry in the live pane, a departure stands down — the pin holds, so both
---- flip passes spell the same repaint: the remembered rows, the block on the
---- pinned entry. No flip ever closes OR OPENS the pane: a dismissed pane
---- (the q keymap, a manual window close) stays dismissed — a focus flip is a
---- cursor move, not a selection, and re-showing the diff through one would
---- resurrect what the user just closed on every window switch. Only an
---- explicit selection (j/k, <C-e>) shows the pane again. The review's
---- lifetime is the diff panel's: the pane closes with the panel (M.close),
---- when the workspace goes clean, or on the pane's own q.
+--- The focus flip: an arrival ON the diff PANEL is a SELECTION — land() the
+--- entry under the cursor, the way a j/k pressed there would (the block draws
+--- on it, its diff renders in the pane — opening a dismissed one: coming
+--- back to the file list means the user wants its diff back). An arrival
+--- anywhere else stands down — the pin holds, the repaint spells the
+--- remembered rows and the block, and a dismissed pane (the q keymap, a
+--- manual window close) stays dismissed. No flip ever closes the pane: the
+--- review's lifetime is the diff panel's — the pane closes with the panel
+--- (M.close), when the workspace goes clean, or on the pane's own q. The
+--- asymmetry is the point: on the panel the cursor IS the selection (j/k,
+--- <C-e> and the arrival spell it the same way), off it the focus flip is a
+--- mere cursor move. The arrival lands in the panel's BIRTH state too — the
+--- cursor rests on entry 1 from the panel's opening, no j ever pressed, and
+--- coming to the file list selects what it rests on (that is why the landing
+--- reads raw_cursor_row, not the sweep-gated cursor_row).
 ---
---- The repaint lands ONE PASS LATER, not inside the event: the WinLeave/
+--- The pass lands ONE PASS LATER, not inside the event: the WinLeave/
 --- WinEnter pair dispatches out of order (the leave can arrive after the
 --- enter of a round-trip — verified through wincmd), so a gate read inside
 --- either event sees whoever was current at dispatch, not where focus
 --- settled. A pass later every event has dispatched and the current-window
---- read is settled. A flip queues at most one repaint (the flag), so
---- held-key window sweeps pay one render, not one per window crossed.
+--- read is settled. A flip queues at most one pass (the flag), so held-key
+--- window sweeps pay one render, not one per window crossed.
 ---
---- Declared BELOW row_file/select_pane: the settled pass selects the entry
+--- Declared BELOW row_file/select_pane: the settled pass lands the entry
 --- under the cursor, and a focus arrival is a selection the same way a j/k is
 --- — Lua locals aren't visible before their declaration (the j/k keymaps hit
 --- this once already).
@@ -421,12 +436,22 @@ local function focus_panel()
   vim.schedule(function()
     repaint_scheduled = false
     if not (M.active() and last_files) then return end
-    render(last_files)
-    -- Focus settled ON the panel: the entry under the cursor is the selection
-    -- the block just drew — re-render it, but only into a LIVE pane (the gate
-    -- above): a pane the user dismissed with q must not resurrect here.
-    if diff_view.active() then
-      select_pane(row_file(cursor_row()))
+    -- Focus settled ON the panel: an arrival is a SELECTION — land the entry
+    -- under the cursor (the pin flips on in the birth state too: the cursor
+    -- resting on entry 1 from the panel's opening is as good as a j pressed
+    -- there, and its diff shows). Focus left: a mere cursor move — repaint
+    -- the pinned block, and re-render into a LIVE pane only (a pane the user
+    -- dismissed with q must not resurrect on every window switch away from
+    -- the panel; an explicit selection — j/k, <C-e>, an arrival on the panel
+    -- — is what shows it again).
+    if vim.api.nvim_get_current_win() == M.win then
+      local row = raw_cursor_row()
+      if row then land(row) end
+    else
+      render(last_files)
+      if diff_view.active() then
+        select_pane(row_file(cursor_row()))
+      end
     end
   end)
 end
