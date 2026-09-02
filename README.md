@@ -32,7 +32,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | ------ | ------------- | ------------------------------------------------------------------- |
 | `<C-a>` | `n`, `t`     | Create a new Claude Code session and open it on the right           |
 | `<C-s>` | `n`, `t`     | No session displayed → show the last closed one; else switch to the next session |
-| `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last) |
+| `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last); with a single changed file it toggles the diff pane instead |
 | `<C-b>` | `n`, `t`     | Toggle a shell split below the displayed session (same width; shell 1/3 of the session's height, session 2/3) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
 
@@ -75,7 +75,9 @@ onto it (its `]]`/`[[`/`<CR>`/`q` take over).
 `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
 and selects a changed file: the FIRST press starts the sweep at the first
 file, and every press after advances from the selection and wraps back past
-the last — whichever window held focus. Landing on a file
+the last — whichever window held focus. With a single changed file there is
+nothing to step to, so the key toggles the diff pane instead (open when
+dismissed, close when showing — `<C-s>`'s single-session spelling). Landing on a file
 (an explicit `j/k` or a `<C-e>` — not the panel's opening) is what
 **renders its working-tree-vs-HEAD diff via
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same

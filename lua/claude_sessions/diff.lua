@@ -300,11 +300,23 @@ end
 --- file. Pressed from anywhere, the way <C-s> cycles sessions. The sweep
 --- carries its position across presses: the first press lands the first file,
 --- every press after advances from the selection and wraps past the last
---- file. Panel down: nothing to step — say so, the way <C-s> does with no
---- sessions.
+--- file. A SINGLE changed file has nothing to step to — the press toggles the
+--- diff pane instead: open when dismissed (landing the file renders it), close
+--- when showing. The toggle mirrors <C-s>'s single-session spelling (its
+--- window toggle); stepping a one-entry list would only ever re-select the
+--- same file, and the pane open/close is the only state left worth cycling.
+--- Panel down: nothing to step — say so, the way <C-s> does with no sessions.
 function M.step_next()
   if not M.active() then
     U.notify('No diff panel: nothing to step through.', vim.log.levels.WARN)
+    return
+  end
+  if U.entry_count(vim.api.nvim_buf_line_count(M.buf)) == 1 then
+    if diff_view.active() then
+      diff_view.close()
+    else
+      land(1)
+    end
     return
   end
   -- The focus move happens for its VISIBILITY and to hand the panel j/k; a
