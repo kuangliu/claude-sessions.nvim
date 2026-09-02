@@ -35,7 +35,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last); with a single changed file it toggles the diff pane instead |
 | `<C-b>` | `n`, `t`     | Toggle a shell split below the displayed session (same width; shell 1/3 of the session's height, session 2/3) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
-| `<C-d>` | `n` (diff panel) | Discard all uncommitted changes of the file under the cursor (a tracked file resets to HEAD, an untracked one is deleted) |
+| `<C-d>` | `n` (diff panel) | Discard all uncommitted changes of the file under the cursor after a `y/N` prompt (a tracked file resets to HEAD, an untracked one is deleted) |
 
 ## Session panel
 
@@ -72,11 +72,11 @@ bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
 block, and the selection is **pinned** — it holds when the cursor moves out of
 the panel, so the review keeps running while you read or work elsewhere.
 `<CR>`/`l` open the file under the cursor in the diff pane and move the cursor
-onto it (its `]]`/`[[`/`<CR>`/`q` take over). `<C-d>` discards all uncommitted
-changes of the file under the cursor, no prompt: a tracked file resets to HEAD
-(staged and unstaged together, the numbers the row shows), an untracked one is
-deleted, and a rename's old name is restored along with it. The rows re-probe
-afterwards; a clean workspace takes the panel down.
+onto it (its `]]`/`[[`/`<CR>`/`d`/`u`/`D`/`c`/`q` take over). `<C-d>` discards
+all uncommitted changes of the file under the cursor after a `y/N` prompt: a
+tracked file resets to HEAD (staged and unstaged together, the numbers the row
+shows), an untracked one is deleted, and a rename's old name is restored along
+with it. The rows re-probe afterwards; a clean workspace takes the panel down.
 `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
 and selects a changed file: the FIRST press starts the sweep at the first
 file, and every press after advances from the selection and wraps back past
@@ -88,7 +88,12 @@ dismissed, close when showing — `<C-s>`'s single-session spelling). Landing on
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
 GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style
 gutter bars, `]]`/`[[` jump hunks, `<CR>` opens the source file, `q` closes
-the pane). Moving the cursor out of the panel does not exit the diff — it
+the pane) — and it edits, diffview-style: `d` reverts the change on the
+cursor line (an added line is deleted from the file, a removed one restored
+back into it; the cursor steps to the next remaining change), `u` undoes the
+last `d`, `D` reverts the whole shown file after a `y/N` prompt (the same
+machinery as the panel's `<C-d>`), and `c` prompts for a commit message,
+stages everything and commits. Moving the cursor out of the panel does not exit the diff — it
 stays until the panel closes, the workspace goes clean, or you press `q` on
 the pane itself. The diff takes over the editor window: your file steps aside
 (cursor and window options remembered) and comes back when the pane exits;
