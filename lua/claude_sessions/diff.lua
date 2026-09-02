@@ -145,9 +145,7 @@ local function fetch_numstat(root, cb)
       end
       if path then
         files[#files + 1] = {
-          path = path, add = tonumber(add), del = tonumber(del),
-          untracked = false, -- tracked, flags known: the discard never re-probes
-          renamed_from = renamed_from,
+          path = path, add = tonumber(add), del = tonumber(del), renamed_from = renamed_from,
         }
       end
     end
@@ -371,75 +369,81 @@ local function focus_panel()
 end
 
 --- The shared tail of every working-tree change (the panel's <C-d>, the diff
---- pane's D/dd/undo): open buffers reload to the restored content, the rows
---- re-probe, and a live pane follows the pin — its render of the edited
---- content is stale the moment the row is gone. `reloaded` false skips the
---- checktime: a vanished untracked file's buffers have only E211 to say.
-function M.reprobe(reloaded)
-  if reloaded then vim.cmd('checktime') end
+--- pane's d/u/D): open buffers reload to the restored content (checktime —
+--- uncommitted edits are never clobbered, the auto_reload convention), the
+--- rows re-probe, and a live pane follows the pin — its render of the edited
+--- content is stale the moment the row is gone.
+function M.reprobe()
+  vim.cmd('checktime')
   M.refresh(function()
     if diff_view.active() then select_pane(row_file(raw_cursor_row())) end
   end)
 end
 
---- Discard every uncommitted change of `spec` — { path, untracked?,
---- renamed_from? } — under `root`, then `done(reloaded)`. The panel's <C-d>
---- reads the flags off the row record; the diff pane's D knows only the path,
---- so nil flags make one status probe classify the file the way the row would
---- have: tracked in HEAD (checkout), staged as new (rm -f), untracked
---- (unlink), with a rename carrying its old name along.
-function M.discard_file(root, spec, done)
-  if spec.untracked == nil then
-    -- The pane's D knows only the path: classify it off one FULL status scan.
-    -- A pathspec-filtered status would not do — `git status -- <new>` spells
-    -- a staged rename as a plain `A`, and the old side (which the discard
-    -- must restore) would be lost.
-    git(root, { 'status', '--porcelain', '--untracked-files=all' }, function(out)
-      local row, renamed_from
-      for _, l in ipairs(out and vim.split(out, '\n', { trimempty = true }) or {}) do
-        local old = l:match('^R%s+(.-) -> ' .. vim.pesc(spec.path) .. '$')
-        if old then
-          row, renamed_from = l, old
-          break
-        end
-        if l:sub(4) == spec.path then
-          row = l
-          break
-        end
+--- Classify `path` into the spec the discard needs, off one full status
+--- scan: tracked in HEAD, staged as new, or untracked, with a staged rename
+--- carrying its old name along. A pathspec-filtered status would not do —
+--- `git status -- <new>` spells a staged rename as a plain `A`, and the old
+--- side (which the discard must restore) would be lost.
+local function classify_file(root, path, done)
+  fetch_status(root, function(rows)
+    local row, renamed_from
+    local rename_pat = '^R%s+(.-) -> ' .. vim.pesc(path) .. '$'
+    for _, l in ipairs(rows or {}) do
+      local old = l:match(rename_pat)
+      if old then
+        row, renamed_from = l, old
+        break
       end
-      M.discard_file(root, {
-        path = spec.path,
-        untracked = (row and row:sub(1, 2) == '??') or false,
-        renamed_from = renamed_from,
-      }, done)
-    end)
-    return
-  end
+      if l:sub(4) == path then
+        row = l
+        break
+      end
+    end
+    done({
+      path = path,
+      untracked = (row and row:sub(1, 2) == '??') or false,
+      renamed_from = renamed_from,
+    })
+  end)
+end
 
-  local name = spec.path:match('[^/]+$') or spec.path
+--- Discard every uncommitted change of `spec` — { path, untracked,
+--- renamed_from? } — under `root`, after the y/N prompt (only a typed y
+--- discards; Enter, or anything else, is a No), then `done()`. Tracked in
+--- HEAD: checkout — staged and unstaged together, the same diff-vs-HEAD the
+--- rows count. Staged as new: `git rm -f`, the rm IS the reset (checkout has
+--- no HEAD copy to take). Untracked: deleted outright, the only discard it
+--- has. A rename carries its old name along, or the source would survive as
+--- a fresh staged deletion.
+function M.discard_file(root, spec, done)
+  local answer = vim.fn.input(('Revert file %s? y/N: '):format(spec.path))
+  if not answer:lower():find('^y') then return end
+
   if spec.untracked then
     local ok = (vim.uv or vim.loop).fs_unlink(root .. '/' .. spec.path)
     if not ok then
       U.notify('Could not delete ' .. spec.path, vim.log.levels.ERROR)
       return
     end
-    return done(false)
+    return done()
   end
 
   -- Not in HEAD (a staged new file): checkout has nothing to take, the rm IS
   -- the reset. Anything else the checkout fails on reports and still settles
   -- — the rows re-probe show whatever actually happened.
+  local name = spec.path:match('[^/]+$') or spec.path
   local function reset_new_side()
     git(root, { 'rm', '-f', '--', spec.path }, function(out)
       if out == nil then
         U.notify('Could not discard ' .. name, vim.log.levels.ERROR)
       end
-      done(true)
+      done()
     end)
   end
   local function checkout_new_side(then_)
     git(root, { 'checkout', 'HEAD', '--', spec.path }, function(out)
-      if out ~= nil then return done(true) end
+      if out ~= nil then return done() end
       then_()
     end)
   end
@@ -454,22 +458,33 @@ function M.discard_file(root, spec, done)
   end
 end
 
--- The diff pane's D reuses this machinery, and its dd/undo edits land here
--- for the rows re-probe — the pane requires nothing back, so the hooks are
--- bound here where the functions exist (the panel/module binding pattern).
-diff_view.discard_file = M.discard_file
-diff_view.reprobe = M.reprobe
+--- The diff pane's D entry: it knows only the path (no row record), so
+--- classify first, then the same prompted discard.
+function M.discard_path(root, path, done)
+  classify_file(root, path, function(spec)
+    M.discard_file(root, spec, done)
+  end)
+end
+
+--- Stage everything and commit with `message`, both steps on jobs — the
+--- commit can take seconds in a large repo, and the editor never blocks on
+--- it. `done(err)` lands scheduled: nil on success, else which step failed.
+function M.commit_all(root, message, done)
+  git(root, { 'add', '--all' }, function(out)
+    if out == nil then return done('git add failed') end
+    git(root, { 'commit', '-m', message }, function(out)
+      if out == nil then return done('git commit failed') end
+      done(nil)
+    end)
+  end)
+end
 
 --- <C-d>: discard every uncommitted change of the file under the cursor —
---- after the same y/N prompt the diff pane's D spells (only a typed y
---- discards; Enter, or anything else, is a No). The row record carries what
---- the discard needs; the shared tail re-probes and lets a live pane follow
---- the pin.
+--- the row record carries what the discard needs; the machinery prompts and
+--- the shared tail re-probes and lets a live pane follow the pin.
 local function discard_current()
   local file = row_file(raw_cursor_row())
   if not file then return end
-  local answer = vim.fn.input(('Revert file %s? y/N: '):format(file.path))
-  if not answer:lower():find('^y') then return end
   M.discard_file(panel_root, file, M.reprobe)
 end
 

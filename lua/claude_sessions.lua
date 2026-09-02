@@ -23,6 +23,7 @@ local M = {}
 
 local panel = require('claude_sessions.panel')
 local diff = require('claude_sessions.diff')
+local diff_view = require('claude_sessions.diff_view')
 local U = require('claude_sessions.util')
 
 local focus = U.focus
@@ -296,6 +297,14 @@ end
 panel.rename_session = function(i, name)
   if sessions[i] then M.rename(i, name) end
 end
+
+--- The diff pane's working-tree edits call back into the diff panel's
+--- machinery: D discards through the same prompted discard as <C-d> (it
+--- knows only the path, so classify_file runs first), c stages and commits
+--- all on jobs, and every edit lands in the shared re-probe tail.
+diff_view.discard_path = diff.discard_path
+diff_view.commit = diff.commit_all
+diff_view.reprobe = diff.reprobe
 
 -- --- Shell terminal ---------------------------------------------------------
 -- <C-b>: a plain shell in a horizontal split below the displayed session's

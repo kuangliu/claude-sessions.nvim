@@ -25,7 +25,18 @@ M.buf = nil
 -- take-over found there and what restore hands back. Nil when the pane lives
 -- in its own split (no editor window was on screen to take over).
 M.replaced = nil
--- The pane's last render target, { abspath, root }: a show() of the same pair
+
+-- Bound by claude_sessions.lua's wiring section (the panel/module pattern):
+-- the pane's working-tree edits own the cursor and the render, the diff
+-- panel owns the rows and the git work. discard_path(root, path, done) runs
+-- the prompted whole-file discard (D); commit(root, message, done) stages
+-- everything and commits on jobs (c); reprobe() re-probes the rows and lets
+-- a live pane follow the pin — the tail every edit lands in.
+M.discard_path = nil
+M.commit = nil
+M.reprobe = nil
+
+-- The pane's last render target, { rel, root }: a show() of the same pair
 -- while the pane is up skips the engine pipeline — the focus-flip arrival pass
 -- re-selects the landed entry on every flip, and a step can land a file the
 -- pane already shows. Two git spawns, a working-file read and a two-sided
@@ -97,6 +108,13 @@ end
 -- the one WinClosed that forgets/rehomes when the pane window dies on its own
 -- (per pane buffer, not per show: per-show would stack one autocmd per reopen
 -- cycle on this long-lived buffer).
+
+-- A row carrying a content change — added or removed. Context, separator and
+-- header rows are not: the hunk jumps and the d edit key on this.
+local function change_row(r)
+  return r and (r.kind == 'add' or r.kind == 'del') or false
+end
+
 local function create_buf()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = 'nofile'
@@ -123,8 +141,7 @@ local function jump_hunk(d)
   local offset = vim.b[buf].diffview_offset or 0
   local total = vim.api.nvim_buf_line_count(buf)
   local function is_change(i)
-    local r = rows and i > 0 and rows[i]
-    return r and (r.kind == 'add' or r.kind == 'del') or false
+    return change_row(rows and i > 0 and rows[i])
   end
   local cur = vim.api.nvim_win_get_cursor(0)[1]
   local i
@@ -181,17 +198,18 @@ end
 -- numbers the edits need — a d on an added row deletes that line from the
 -- working file, on a removed row it restores the line into it (exact for
 -- end-of-file deletions and del runs behind add hunks), each edit is pushed
--- on the buffer's undo stack for u, D reverts the whole shown file through
--- the diff panel's discard machinery, and c stages everything and commits —
--- the review is of the whole workspace, so the commit is too. The rows are
--- the view's source of truth; the working file is the edits': a stale view
--- (the file changed underneath) refuses the edit rather than guessing.
+-- on the undo stack for u, D reverts the whole shown file through the diff
+-- panel's discard machinery, and c stages everything and commits — the
+-- review is of the whole workspace, so the commit is too. The rows are the
+-- view's source of truth; the working file is the edits': a stale view (the
+-- file changed underneath) refuses the edit rather than guessing.
 
--- Bound by diff.lua at load: the panel owns the rows and the git discard,
--- the pane calls back after its edits so the rows re-probe (and a clean
--- workspace takes the whole review down).
-M.discard_file = nil
-M.reprobe = nil
+-- The d edits' undo stack — module-local on purpose: each entry holds two
+-- whole-file snapshots, and a vim.b stack would deep-copy all of them
+-- through VimL on every push. The depth cap bounds the retention; the stack
+-- dies with the review (M.close).
+local undo_stack = {}
+local UNDO_DEPTH = 20
 
 --- The file the pane shows, resolved for the edits: `rel` (repo-relative, as
 --- the rows carry it), `root`, and `path` (absolute — the working file). Nil
@@ -199,19 +217,17 @@ M.reprobe = nil
 local function edit_target()
   if not (M.active() and last_target) then return nil end
   return {
-    rel = last_target.abspath,
+    rel = last_target.rel,
     root = last_target.root,
-    path = last_target.root .. '/' .. last_target.abspath,
+    path = last_target.root .. '/' .. last_target.rel,
   }
 end
 
--- Join edited lines back into file content. `trailing` keeps the file's own
--- trailing newline; `add_newline` appends one (a restored line landing at the
--- END of a file that lacks one inherits it from the HEAD side, so the revert
--- shows as complete instead of a lone newline diff).
-local function join_lines(ls, trailing, add_newline)
+-- Join edited lines back into file content, re-appending the newline a file
+-- with a trailing newline owns.
+local function join_lines(ls, want_newline)
   local out = table.concat(ls, '\n')
-  if (trailing or add_newline) and #ls > 0 then out = out .. '\n' end
+  if want_newline and #ls > 0 then out = out .. '\n' end
   return out
 end
 
@@ -238,15 +254,12 @@ local function write_working_file(abspath, content)
   return true
 end
 
--- Reload open, unmodified buffers of the edited file so the edit shows up in
--- the editor too. Buffers with unsaved changes are left alone.
-local function reload_open_buffers(abspath)
-  for _, b in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(b) and not vim.bo[b].modified
-        and vim.api.nvim_buf_get_name(b) == abspath then
-      pcall(vim.api.nvim_buf_call, b, function() vim.cmd('edit!') end)
-    end
-  end
+-- The working file as the edits see it: lines, the row's own content with
+-- the render's sign char stripped, and whether the file ends with a newline.
+local function read_working(path, r)
+  local raw = git.read_file_raw(path)
+  return raw and git.lines(raw) or {}, r.text:sub(2),
+    raw and raw:sub(-1) == '\n' or false, raw
 end
 
 -- View-row index (1-based) of the cursor's current line, or nil for headers.
@@ -259,16 +272,12 @@ end
 
 -- Revert an added line: delete it from the working file. Returns the new file
 -- content and the undo entry; nil content if the view is stale.
-local function revert_add(path, r)
-  local new_raw = git.read_file_raw(path)
-  local ls = new_raw and git.lines(new_raw) or {}
-  local content = r.text:sub(2)
-  local trailing_new = new_raw and new_raw:sub(-1) == '\n' or false
+local function revert_add(t, r)
+  local ls, content, trailing_new, raw = read_working(t.path, r)
   if ls[r.newln] ~= content then return nil, nil end
   table.remove(ls, r.newln)
-  local out = join_lines(ls, trailing_new, false)
-  local entry = { kind = 'add', pos = r.newln, before = new_raw, after = out }
-  return out, entry
+  local out = join_lines(ls, trailing_new)
+  return out, { kind = 'add', pos = r.newln, before = raw, after = out }
 end
 
 -- Revert a removed line: restore it into the working file at the new-side
@@ -278,12 +287,9 @@ end
 -- in the new file). Exact for every case — including end-of-file deletions,
 -- where vim.diff anchors the hunk at the new side's start, and del runs that
 -- follow earlier add hunks.
-local function revert_del(path, rows, idx, root, rel)
+local function revert_del(t, rows, idx)
   local r = rows[idx]
-  local new_raw = git.read_file_raw(path)
-  local ls = new_raw and git.lines(new_raw) or {}
-  local content = r.text:sub(2)
-  local trailing_new = new_raw and new_raw:sub(-1) == '\n' or false
+  local ls, content, trailing_new, raw = read_working(t.path, r)
 
   local dels_before, adds_before = 0, 0
   for i = 1, idx - 1 do
@@ -303,33 +309,35 @@ local function revert_del(path, rows, idx, root, rel)
     end
   end
 
+  -- a restored line landing at the END of a file that lacks a trailing
+  -- newline inherits one from the HEAD side, so the revert shows as complete
+  -- instead of a lone newline diff
   local old_trailing = false
   if at_end and not trailing_new then
-    local old_raw = git.git_show_raw(root, 'HEAD:' .. rel)
+    local old_raw = git.git_show_raw(t.root, 'HEAD:' .. t.rel)
     old_trailing = old_raw and old_raw:sub(-1) == '\n' or false
   end
   table.insert(ls, pos, content)
-  local out = join_lines(ls, trailing_new, at_end and old_trailing)
-  local entry = { kind = 'del', pos = pos, old_line = r.oldln, before = new_raw, after = out }
-  return out, entry
+  local out = join_lines(ls, trailing_new or (at_end and old_trailing))
+  return out, { kind = 'del', pos = pos, old_line = r.oldln, before = raw, after = out }
 end
 
--- Finish a working-tree edit: reload open buffers, re-render the pane from
--- the new working-tree state (forced — the target did not change but its
--- content did), and let the panel re-probe (its counts follow; a clean
--- workspace takes the review down).
+-- Finish a working-tree edit: the panel's probes start first (their
+-- callbacks land once this chunk yields — after the re-render below, whose
+-- same-target skip keeps the re-probe's pane follow from double-rendering),
+-- and the re-probe's checktime reloads open buffers to the new content. The
+-- re-render is forced: the target did not change but its content did.
 local function after_edit(t)
-  reload_open_buffers(t.path)
+  M.reprobe()
   M.show(t.rel, t.root, true)
-  if M.reprobe then M.reprobe(false) end
 end
 
 --- d: revert the change on the cursor line — an added line is deleted from
 --- the working file, a removed line is restored into it. The edit is written
 --- straight to disk (the view's source of truth), the view re-renders and
 --- the cursor moves to the next remaining change line. Each edit is pushed
---- onto the buffer's undo stack as before/after content snapshots, so `u`
---- can restore the exact prior state.
+--- onto the undo stack as before/after content snapshots, so `u` can restore
+--- the exact prior state.
 function M.revert_line()
   local buf = vim.api.nvim_get_current_buf()
   local t = edit_target()
@@ -340,25 +348,24 @@ function M.revert_line()
   local rows = vim.b[buf].diffview_rows
   local idx = cursor_row(buf)
   local r = rows and idx and rows[idx]
-  if not r or (r.kind ~= 'add' and r.kind ~= 'del') then
+  if not change_row(r) then
     U.notify('diff pane: not on a changed line', vim.log.levels.WARN)
     return
   end
 
   local out, entry
   if r.kind == 'add' then
-    out, entry = revert_add(t.path, r)
+    out, entry = revert_add(t, r)
   else
-    out, entry = revert_del(t.path, rows, idx, t.root, t.rel)
+    out, entry = revert_del(t, rows, idx)
   end
   if not entry then
     U.notify('diff pane: working file changed; reopen the view', vim.log.levels.WARN)
     return
   end
   if not write_working_file(t.path, out) then return end
-  local stack = vim.b[buf].diffview_undo or {}
-  stack[#stack + 1] = entry
-  vim.b[buf].diffview_undo = stack
+  undo_stack[#undo_stack + 1] = entry
+  if #undo_stack > UNDO_DEPTH then table.remove(undo_stack, 1) end
 
   after_edit(t)
 
@@ -368,8 +375,7 @@ function M.revert_line()
   local rows2 = vim.b[buf].diffview_rows
   local off2 = vim.b[buf].diffview_offset or 0
   for i = math.max(vim.api.nvim_win_get_cursor(0)[1], off2 + 1), vim.api.nvim_buf_line_count(buf) do
-    local rr = rows2[i - off2]
-    if rr and (rr.kind == 'add' or rr.kind == 'del') then
+    if change_row(rows2[i - off2]) then
       vim.api.nvim_win_set_cursor(0, { i, 0 })
       break
     end
@@ -387,21 +393,18 @@ function M.undo_revert()
     U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
     return
   end
-  local stack = vim.b[buf].diffview_undo or {}
-  local entry = stack[#stack]
+  local entry = undo_stack[#undo_stack]
   if not entry then
     U.notify('diff pane: nothing to undo', vim.log.levels.INFO)
     return
   end
   if git.read_file_raw(t.path) ~= entry.after then
-    table.remove(stack, #stack)
-    vim.b[buf].diffview_undo = stack -- vim.b values are copies; write back
+    undo_stack[#undo_stack] = nil -- stale: the file moved under the stack
     U.notify('diff pane: working file changed; skipping undo', vim.log.levels.WARN)
     return
   end
   if not write_working_file(t.path, entry.before) then return end
-  table.remove(stack, #stack)
-  vim.b[buf].diffview_undo = stack -- vim.b values are copies; write back
+  undo_stack[#undo_stack] = nil
 
   after_edit(t)
 
@@ -411,10 +414,12 @@ function M.undo_revert()
   local rows = vim.b[buf].diffview_rows
   local offset = vim.b[buf].diffview_offset or 0
   local target
-  for i, r in ipairs(rows) do
-    if entry.kind == 'add' then
+  if entry.kind == 'add' then
+    for i, r in ipairs(rows) do
       if r.newln == entry.pos then target = i; break end
-    else
+    end
+  else
+    for i, r in ipairs(rows) do
       if r.kind == 'del' and r.oldln == entry.old_line then target = i; break end
     end
   end
@@ -424,22 +429,18 @@ function M.undo_revert()
 end
 
 --- D: revert the whole shown file — the diff panel's <C-d> machinery on the
---- pane's target (the hook classifies what the row record would have said),
---- with the same tail: buffers reload, the rows re-probe, and the pin hands
---- a live pane the cursor's next file — or the clean workspace closes the
---- review. Asks first: a whole-file revert is a bigger swing than a line
---- edit, and the y/N prompt spells the default — only a typed y reverts;
---- Enter (or anything else) is a No.
+--- pane's target (classify first: the pane has no row record to read the
+--- flags off), with the same tail: buffers reload, the rows re-probe, and
+--- the pin hands a live pane the cursor's next file — or the clean workspace
+--- closes the review. The discard prompts its y/N.
 function M.revert_file()
   local buf = vim.api.nvim_get_current_buf()
   local t = edit_target()
-  if not (t and buf == M.buf) or not M.discard_file then
+  if not (t and buf == M.buf) then
     U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
     return
   end
-  local answer = vim.fn.input(('Revert file %s? y/N: '):format(t.rel))
-  if not answer:lower():find('^y') then return end
-  M.discard_file(t.root, { path = t.rel }, M.reprobe)
+  M.discard_path(t.root, t.rel, M.reprobe)
 end
 
 --- c: prompt for a commit message, stage everything and commit. The review
@@ -447,7 +448,7 @@ end
 --- The re-probe on the landing closes the review when the commit emptied it.
 function M.commit_changes()
   local t = edit_target()
-  if not (t and git) then return end
+  if not t then return end
   vim.ui.input({ prompt = 'Commit message: ' }, function(input)
     if input == nil then return end -- cancelled
     local message = vim.trim(input)
@@ -455,13 +456,14 @@ function M.commit_changes()
       U.notify('diff pane: commit message cannot be empty', vim.log.levels.WARN)
       return
     end
-    local _, err = git.commit_all(t.root, message)
-    if err then
-      U.notify('diff pane: ' .. err, vim.log.levels.ERROR)
-      return
-    end
-    U.notify('diff pane: committed changes')
-    if M.reprobe then M.reprobe(false) end
+    M.commit(t.root, message, function(err)
+      if err then
+        U.notify('diff pane: ' .. err, vim.log.levels.ERROR)
+        return
+      end
+      U.notify('diff pane: committed changes')
+      M.reprobe()
+    end)
   end)
 end
 
@@ -469,20 +471,17 @@ end
 -- d/u revert (and undo the revert of) the cursor line, D reverts the whole
 -- file, c commits.
 local function set_keymaps(buf)
-  vim.keymap.set('n', ']]', function() jump_hunk(1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: next change' })
-  vim.keymap.set('n', '[[', function() jump_hunk(-1) end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: prev change' })
-  vim.keymap.set('n', '<CR>', jump_to_source,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: open source' })
-  vim.keymap.set('n', 'd', function() M.revert_line() end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: revert line' })
-  vim.keymap.set('n', 'u', function() M.undo_revert() end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: undo revert' })
-  vim.keymap.set('n', 'D', function() M.revert_file() end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: revert file' })
-  vim.keymap.set('n', 'c', function() M.commit_changes() end,
-    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: commit changes' })
+  local function map(key, fn, desc)
+    vim.keymap.set('n', key, fn,
+      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
+  end
+  map(']]', function() jump_hunk(1) end, 'next change')
+  map('[[', function() jump_hunk(-1) end, 'prev change')
+  map('<CR>', jump_to_source, 'open source')
+  map('d', M.revert_line, 'revert line')
+  map('u', M.undo_revert, 'undo revert')
+  map('D', M.revert_file, 'revert file')
+  map('c', M.commit_changes, 'commit changes')
 end
 
 --- The editor window the pane takes over: a real (non-floating) window whose
@@ -562,21 +561,21 @@ local function show_window(buf)
   M.win = win
 end
 
---- Render the diff of `abspath` (a repo-relative path, as the diff panel's
---- rows carry) against `root`, and show it in the pane. No-op without the
---- engine (diffview absent) or a root. Reuses the pane window and buffer
---- across calls, so stepping files re-renders in place. `force` re-renders a
---- same target — the working-tree edits (d/u) changed what the diff shows,
---- and a fresh render must not be skipped for being "already there".
-function M.show(abspath, root, force)
-  if not (ok and render and git and abspath and root) then return end
+--- Render the diff of `rel` (a repo-relative path, as the diff panel's rows
+--- carry) against `root`, and show it in the pane. No-op without the engine
+--- (diffview absent) or a root. Reuses the pane window and buffer across
+--- calls, so stepping files re-renders in place. `force` re-renders a same
+--- target — the working-tree edits (d/u) changed what the diff shows, and a
+--- fresh render must not be skipped for being "already there".
+function M.show(rel, root, force)
+  if not (ok and render and git and rel and root) then return end
   -- Same-target skip: the pane already shows this file's diff — a focus
   -- arrival re-selects the landed entry on every flip, and a step lands a
   -- file the pane may already be showing (a wrapped cycle revisits file
   -- one). The skip leaves the pane (and its cursor) exactly as this show
   -- would have; `force` (a working-tree edit) bypasses it.
   local same_target = M.active() and last_target ~= nil
-    and last_target.abspath == abspath and last_target.root == root
+    and last_target.rel == rel and last_target.root == root
   if same_target and not force then
     return
   end
@@ -585,13 +584,14 @@ function M.show(abspath, root, force)
   -- arrivals/departures, but neither half holds a state to flip — the panel's
   -- selection is pinned and a departure spells no close — so the flip pair
   -- lands a repaint either way and stands.
-  last_target = { abspath = abspath, root = root }
-  local rel = git.relpath(root, abspath)
+  last_target = { rel = rel, root = root }
 
   local old_raw = git.git_show_raw(root, 'HEAD:' .. rel) -- nil for untracked files
   local new_raw = git.read_file_raw(root .. '/' .. rel) -- nil for deleted files
   local rows, counts
-  if git.is_binary(root, rel, root .. '/' .. rel) then
+  -- The binary probe is skipped on a forced re-render: the edit path just
+  -- round-tripped the file through text reads and writes, so it is text.
+  if not force and git.is_binary(root, rel, root .. '/' .. rel) then
     rows = { render.row('Binary file differs (not shown)', 'del', nil, 1) }
     counts = { add = 0, del = 1 }
   else
@@ -620,8 +620,7 @@ function M.show(abspath, root, force)
     local rows2 = vim.b[buf].diffview_rows
     local off2 = vim.b[buf].diffview_offset or 0
     for i = 1, #(rows2 or {}) do
-      local r = rows2[i]
-      if r.kind == 'add' or r.kind == 'del' then
+      if change_row(rows2[i]) then
         pcall(vim.api.nvim_win_set_cursor, M.win, { off2 + i, 0 })
         return
       end
@@ -643,6 +642,7 @@ function M.close()
   end
   M.win, M.buf = nil, nil
   last_target = nil -- the pane's context ended: the next show re-renders
+  undo_stack = {} -- the edits' undo entries died with the review
 end
 
 return M
