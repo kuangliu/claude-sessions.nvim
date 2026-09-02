@@ -130,17 +130,23 @@ end
 
 --- The changes `git diff --numstat HEAD` reports: one { path, add, del } per
 --- row (`add<TAB>del<TAB>path`; both counts `-` on unmerged paths — skipped).
---- Renames arrive mangled ('old => new'); the new path is shown.
+--- Renames arrive mangled ('old => new'); the new path is shown, and the old
+--- one rides along as `renamed_from` — the discard needs it, or restoring
+--- only the new name would leave the source behind as a staged deletion.
 local function fetch_numstat(root, cb)
   git(root, { 'diff', '--numstat', 'HEAD' }, function(out)
     local files = {}
     for _, row in ipairs(out and vim.split(out, '\n', { trimempty = true }) or {}) do
       local add, del, path = row:match('^(%d+)%s+(%d+)%s+(.+)$')
+      local renamed_from
       if path and path:match('=>') then
+        renamed_from = path:match('^(.+) => ') -- the old side of a full rename
         path = path:match('=> (.+)$') or path
       end
       if path then
-        files[#files + 1] = { path = path, add = tonumber(add), del = tonumber(del) }
+        files[#files + 1] = {
+          path = path, add = tonumber(add), del = tonumber(del), renamed_from = renamed_from,
+        }
       end
     end
     cb(files)
@@ -362,10 +368,77 @@ local function focus_panel()
   end)
 end
 
+--- <C-d>: discard every uncommitted change of the file under the cursor. A
+--- tracked file resets to HEAD — staged and unstaged together, the same
+--- diff-vs-HEAD the rows count (`git checkout HEAD --`); a staged NEW file is
+--- not in HEAD for checkout to take, so there the change IS the file and
+--- `git rm -f` spells the discard; an untracked one is deleted outright, the
+--- only discard it has. A rename restores its old name too, or the source the
+--- rename moved would survive as a fresh staged deletion. No prompt: the
+--- panel's <C-d> is the family's destructive key (a terminal <C-d> closes a
+--- session without asking); the pane (if up) follows the pin to whatever the
+--- cursor rests on after the shrunken list re-renders — its render of the
+--- discarded content is stale the moment the row is gone.
+local function discard_current()
+  local file = row_file(raw_cursor_row())
+  if not file then return end
+  local name = file.path:match('[^/]+$') or file.path
+  local root = panel_root
+
+  -- One spelling of "the discard landed": open buffers reload to the restored
+  -- content, the rows re-probe, and a live pane re-selects the cursor's entry
+  -- (never resurrecting a dismissed one — the focus pass's rule). Skipped
+  -- checktime on the untracked deletion: a vanished file's buffers only have
+  -- E211 to say.
+  local function settled(reloaded)
+    if reloaded then vim.cmd('checktime') end
+    M.refresh(function()
+      if diff_view.active() then select_pane(row_file(raw_cursor_row())) end
+    end)
+  end
+
+  if file.untracked then
+    local ok = (vim.uv or vim.loop).fs_unlink(root .. '/' .. file.path)
+    if not ok then
+      U.notify('Could not delete ' .. file.path, vim.log.levels.ERROR)
+      return
+    end
+    return settled(false)
+  end
+
+  -- Not in HEAD (a staged new file): checkout has nothing to take, the rm IS
+  -- the reset. Anything else the checkout fails on reports and still settles
+  -- — the rows re-probe show whatever actually happened.
+  local function reset_new_side()
+    git(root, { 'rm', '-f', '--', file.path }, function(out)
+      if out == nil then
+        U.notify('Could not discard ' .. name, vim.log.levels.ERROR)
+      end
+      settled(true)
+    end)
+  end
+  local function checkout_new_side(then_)
+    git(root, { 'checkout', 'HEAD', '--', file.path }, function(out)
+      if out ~= nil then return settled(true) end
+      then_()
+    end)
+  end
+  -- The rename's old name first, so the rows never re-probe a half-done
+  -- discard (old still staged-deleted while the new name is already gone).
+  if file.renamed_from then
+    git(root, { 'checkout', 'HEAD', '--', file.renamed_from }, function()
+      checkout_new_side(reset_new_side)
+    end)
+  else
+    checkout_new_side(reset_new_side)
+  end
+end
+
 --- j/k (and <Down>/<Up>): move the panel cursor; <CR>/l: hand the pane the
---- cursor. The editing keys are silenced first (util's shared list) so these
---- win; everything else keeps its default. NOT silenced: <C-a> — the global
---- mapping creates a session.
+--- cursor; <C-d>: discard the file under the cursor outright. The editing
+--- keys are silenced first (util's shared list) so these win; everything else
+--- keeps its default. NOT silenced: <C-a> — the global mapping creates a
+--- session.
 local function set_keymaps(buf)
   U.silence_editing_keys(buf)
   local function map(key, fn, desc)
@@ -395,14 +468,17 @@ local function set_keymaps(buf)
   end
   map('<CR>', open_pane, 'open diff in pane')
   map('l', open_pane, 'open diff in pane')
+  map('<C-d>', discard_current, 'discard file changes')
 end
 
 --- Fetch the current diff and repaint the panel. No-op when the panel is
 --- gone — the poll loop calls this per tick. A refresh that finds NO changes
 --- closes the panel again (the workspace went clean while it was up). The two
 --- probes run concurrently and join; one refresh runs at a time (`in_flight`)
---- — queuing more would land stale rows out of order.
-function M.refresh()
+--- — queuing more would land stale rows out of order. `then_` runs after a
+--- join that rendered rows — never after the clean close, where there is
+--- nothing left to follow up on (the discard's pane follow-up is the caller).
+function M.refresh(then_)
   if not (M.active() and panel_root and not in_flight) then return end
   in_flight = true
   local root = panel_root
@@ -423,6 +499,7 @@ function M.refresh()
     end
     last_files = files -- land/focus_panel's repaints replay these
     render(files)
+    if then_ then then_() end
   end
   fetch_numstat(root, function(rows)
     files = rows or {}

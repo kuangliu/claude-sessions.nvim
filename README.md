@@ -35,6 +35,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last); with a single changed file it toggles the diff pane instead |
 | `<C-b>` | `n`, `t`     | Toggle a shell split below the displayed session (same width; shell 1/3 of the session's height, session 2/3) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
+| `<C-d>` | `n` (diff panel) | Discard all uncommitted changes of the file under the cursor (a tracked file resets to HEAD, an untracked one is deleted) |
 
 ## Session panel
 
@@ -71,7 +72,11 @@ bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
 block, and the selection is **pinned** — it holds when the cursor moves out of
 the panel, so the review keeps running while you read or work elsewhere.
 `<CR>`/`l` open the file under the cursor in the diff pane and move the cursor
-onto it (its `]]`/`[[`/`<CR>`/`q` take over).
+onto it (its `]]`/`[[`/`<CR>`/`q` take over). `<C-d>` discards all uncommitted
+changes of the file under the cursor, no prompt: a tracked file resets to HEAD
+(staged and unstaged together, the numbers the row shows), an untracked one is
+deleted, and a rename's old name is restored along with it. The rows re-probe
+afterwards; a clean workspace takes the panel down.
 `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
 and selects a changed file: the FIRST press starts the sweep at the first
 file, and every press after advances from the selection and wraps back past
