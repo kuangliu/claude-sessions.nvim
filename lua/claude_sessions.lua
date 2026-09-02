@@ -318,6 +318,7 @@ local function open_shell_window(below)
   vim.cmd('below ' .. height .. 'split')
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, shell_buf)
+  U.plain_terminal_window(win) -- the shell draws its own cursor too
   shell_win = win
   return win
 end
@@ -493,6 +494,7 @@ show_session = function(s)
   end)
   panel.switching = false
   current = s
+  U.plain_terminal_window(s.term.window) -- terminals draw their own cursor
   panel.open() -- refresh rows (open/closed states flipped)
   diff.open() -- the uncommitted-changes panel above the tree
   sync_shell() -- the shell split re-anchors below the new session window
@@ -624,6 +626,7 @@ function M.close_current(target, close_opts)
     -- The window inherited the closed session's highlights; apply the new
     -- session's.
     require('toggleterm.ui').hl_term(next_session.term)
+    U.plain_terminal_window(win) -- and re-strip the cursorline/cursorcolumn
     panel.open()
     diff.refresh()
     if not stepping then
@@ -830,6 +833,34 @@ function M.setup(user_opts)
         vim.bo.filetype = 'claude'
       end
     end,
+  })
+
+  -- No cursorline/cursorcolumn in terminal windows, wherever a terminal
+  -- buffer lands (see util.TERMINAL_PLAIN for why): the global options only
+  -- paint behind a terminal's own cursor, and the paint goes stale on every
+  -- window switch. Covers toggleterm's own opens and plain terminals outside
+  -- this plugin's windows; the plugin's own terminal windows are stripped
+  -- directly at their open sites. Both hooks are needed — BufWinEnter fires
+  -- when an EXISTING terminal buffer is displayed in a window, TermOpen when
+  -- termopen flips an already-displayed buffer into one (toggleterm's fresh
+  -- open is exactly that order: split first, spawn second). One cosmetic
+  -- tradeoff, accepted: a window that shows a terminal buffer keeps the strip
+  -- if it later shows a file — every window here that shows a terminal shows
+  -- one forever.
+  local function strip_terminal_windows(buf)
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      local ok, b = pcall(vim.api.nvim_win_get_buf, w)
+      if ok and b == buf then U.plain_terminal_window(w) end
+    end
+  end
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    callback = function(ev)
+      if vim.bo[ev.buf].buftype ~= 'terminal' then return end
+      strip_terminal_windows(ev.buf)
+    end,
+  })
+  vim.api.nvim_create_autocmd('TermOpen', {
+    callback = function(ev) strip_terminal_windows(ev.buf) end,
   })
 
   panel.setup()

@@ -167,6 +167,22 @@ function U.plain_text_window(win)
   U.apply_winopts(win, PLAIN_TEXT)
 end
 
+-- Terminals draw their own cursor; the global cursorline/cursorcolumn only
+-- paint BEHIND it — a full-width row plus a full-height column — and a
+-- terminal screen never repaints the cells those stop highlighting when focus
+-- moves on, so every window switch leaves the cross (or the T a CLI's next
+-- frame cleared half of) baked into the terminal. The panels' plain look
+-- already drops both; terminal windows need the same two dropped — directly
+-- at the open sites of the windows this plugin owns, and via the BufWinEnter
+-- hook in setup() wherever a terminal buffer lands in any other window.
+local TERMINAL_PLAIN = { cursorline = false, cursorcolumn = false }
+
+--- Strip cursorline/cursorcolumn from a window showing a terminal buffer
+--- (see TERMINAL_PLAIN for why they must never draw there).
+function U.plain_terminal_window(win)
+  U.apply_winopts(win, TERMINAL_PLAIN)
+end
+
 --- Calibrate the sidebar stack (the tree + the panels split below it) to
 --- thirds: every window but the first takes floor(rows / 3); the first (the
 --- tree) takes the remainder — the stack's largest share, never crushed. The
