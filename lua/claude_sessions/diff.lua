@@ -386,13 +386,16 @@ function M.step_next()
   move_cursor(1, true)
 end
 
---- Repaint the rows through a FOCUS flip: an arrival selects the entry under
---- the cursor (the block lands there and the pane re-renders it), a departure
---- stands down — the pin holds, so both flip passes spell the same repaint:
---- the remembered rows, the block on the pinned entry. No flip ever closes
---- the pane — the review's lifetime is the diff panel's, not the cursor's:
---- it closes with the panel (M.close), when the workspace goes clean, or when
---- the user presses q on the pane itself.
+--- Repaint the rows through a FOCUS flip: an arrival re-renders the pinned
+--- entry in the live pane, a departure stands down — the pin holds, so both
+--- flip passes spell the same repaint: the remembered rows, the block on the
+--- pinned entry. No flip ever closes OR OPENS the pane: a dismissed pane
+--- (the q keymap, a manual window close) stays dismissed — a focus flip is a
+--- cursor move, not a selection, and re-showing the diff through one would
+--- resurrect what the user just closed on every window switch. Only an
+--- explicit selection (j/k, <C-e>) shows the pane again. The review's
+--- lifetime is the diff panel's: the pane closes with the panel (M.close),
+--- when the workspace goes clean, or on the pane's own q.
 ---
 --- The repaint lands ONE PASS LATER, not inside the event: the WinLeave/
 --- WinEnter pair dispatches out of order (the leave can arrive after the
@@ -420,10 +423,11 @@ local function focus_panel()
     if not (M.active() and last_files) then return end
     render(last_files)
     -- Focus settled ON the panel: the entry under the cursor is the selection
-    -- the block just drew — its diff lands in the right-side pane in the same
-    -- flip. Focus left: nothing — the selection is pinned, so this repaint
-    -- spells the same block and the pane keeps running wherever the user went.
-    select_pane(row_file(cursor_row()))
+    -- the block just drew — re-render it, but only into a LIVE pane (the gate
+    -- above): a pane the user dismissed with q must not resurrect here.
+    if diff_view.active() then
+      select_pane(row_file(cursor_row()))
+    end
   end)
 end
 

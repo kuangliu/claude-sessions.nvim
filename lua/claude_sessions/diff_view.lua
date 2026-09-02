@@ -44,8 +44,12 @@ local function engine()
   return ok and render and git
 end
 
---- Is the pane window (still) up?
-local function active()
+--- Is the pane window (still) up? The gate for every entry here, and the one
+--- read diff.lua's focus pass makes: a focus flip may only re-render a LIVE
+--- pane — a dismissal (the q keymap, a manual window close) must not be
+--- resurrected by one; only an explicit selection (j/k, <C-e>) shows the
+--- pane again.
+function M.active()
   return U.valid_win(M.win)
 end
 
@@ -214,7 +218,7 @@ end
 --- seeded at the terminal's own width (`columns * 0.4`, the sessions config's
 --- vertical size), so the pane and the terminal read as one pair.
 local function show_window(buf)
-  if active() then
+  if M.active() then
     if vim.api.nvim_win_get_buf(M.win) ~= buf then
       vim.api.nvim_win_set_buf(M.win, buf)
     end
@@ -279,7 +283,7 @@ function M.show(abspath, root)
   -- file the pane may already be showing (a wrapped cycle revisits file
   -- one). The skip leaves the pane (and its cursor) exactly as this show
   -- would have.
-  if active() and last_target and last_target.abspath == abspath
+  if M.active() and last_target and last_target.abspath == abspath
       and last_target.root == root then
     return
   end
@@ -335,7 +339,7 @@ end
 --- buffer, cursor and window options go back the way the take-over found
 --- them, and only the pane's scratch buffer dies.
 function M.close()
-  if not M.replaced and active() then
+  if not M.replaced and M.active() then
     pcall(vim.api.nvim_win_close, M.win, true)
   end
   release(M.win)
