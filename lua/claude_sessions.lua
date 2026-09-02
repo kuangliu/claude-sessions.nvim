@@ -7,33 +7,32 @@
 -- botright vsplit + vertical resize path.
 --
 -- While a session window is displayed, a session-list panel is split below
--- nvim-tree, styled after Claude Code's session picker: a state symbol and
--- name per session (with the state word and a blank separator below it), the
--- displayed session marked by an arrow and a block background; j/k steps
--- through the list switching sessions live. See claude_sessions/panel.lua.
+-- nvim-tree, styled after Claude Code's session picker (panel.lua), and —
+-- when the workspace is dirty — a changed-files diff panel between the two
+-- (diff.lua), whose selection renders the file's diff in a right-side pane
+-- (diff_view.lua).
 --
 -- Keymaps:
 --   <C-a>  create a new session and open it on the right
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
---   <C-e>  focus the diff panel and step to the next changed file — the
---          first press starts the sweep, later presses advance from the
---          selection and wrap past the last file (either window focused)
+--   <C-e>  focus the diff panel and step to the next changed file
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}
 
 local panel = require('claude_sessions.panel')
 local diff = require('claude_sessions.diff')
-local U = require('claude_sessions.util') -- shared window/buffer helpers
+local U = require('claude_sessions.util')
+
+local focus = U.focus
+local notify = U.notify
 
 -- --- Options --------------------------------------------------------------
 -- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
 -- running session's claude process changed on disk. Reloads are safe:
 -- `checktime` skips buffers with uncommitted edits, so in-progress work is
 -- never clobbered.
-local opts = {
-  auto_reload = true,
-}
+local opts = { auto_reload = true }
 local setup_done = false
 
 -- --- State ----------------------------------------------------------------
@@ -44,24 +43,14 @@ local sessions = {}
 local current = nil
 local last_closed = nil
 
--- --- Small helpers ----------------------------------------------------------
-
---- Focus a window, if it is still there. util's helper — the fallback-less
---- spelling of the same pcall'd focus the panels' reclaim uses.
-local focus = U.focus
-
---- The plugin's notify convention (util's shared helper — the title lives
---- there, and the panels spell it too).
-local notify = U.notify
-
--- --- Poll loop -------------------------------------------------------------
+-- --- Poll loop ---------------------------------------------------------------
 -- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS and drives two
 -- cheap jobs: fetching each agent's busy state (`claude agents --json`) and,
 -- while anything is busy, blinking the statusline dots and auto-reloading
 -- buffers the agent changed on disk. Everything is gated on `any_busy` (or on
 -- busy<->idle transitions), so an idle editor pays nothing, and the timer
 -- stops entirely once the last session closes.
-local busy_by_pid = {} -- map<number pid, string status ('busy'/'idle'/...)
+local busy_by_pid = {} -- map<pid, status string ('busy'/'idle'/...)>
 local any_busy = false -- is any live session's agent busy right now?
 local blink_on = true -- toggled once per statusline render; busy dots alternate
 local poll_timer = nil
@@ -77,8 +66,7 @@ local function session_pid(s)
   local job_id = s.term and s.term.job_id
   if not job_id then return nil end
   local ok, pid = pcall(vim.fn.jobpid, job_id)
-  if ok and pid and pid > 0 then return pid end
-  return nil
+  return ok and pid and pid > 0 and pid or nil
 end
 
 --- This session's agent state as reported by `claude agents --json` —
@@ -86,11 +74,9 @@ end
 --- nil when the pid is unknown or not yet in the cache.
 local function session_state(s)
   local pid = session_pid(s)
-  if pid == nil then return nil end
-  return busy_by_pid[pid]
+  return pid and busy_by_pid[pid] or nil
 end
 
---- Is this session's agent currently busy? False when the state is unknown.
 local function session_busy(s)
   return session_state(s) == 'busy'
 end
@@ -116,16 +102,13 @@ local function update_busy()
   vim.cmd('redrawstatus')
 end
 
---- Async-fetch `claude agents --json` and refresh the pid -> busy cache.
---- Runs the CLI on a job (non-blocking) — util's shared job helper lands the
---- stdout as one string, or nil on a failed spawn (e.g. `claude` not on PATH
---- when nvim was launched without the shell environment: keep the last known
---- busy state and retry on the next tick).
+--- Async-fetch `claude agents --json` and refresh the pid -> status cache.
+--- Non-blocking; a failed spawn (`claude` not on PATH) keeps the last known
+--- busy state and retries on the next tick.
 ---
 --- Sessions spawned inside an nvim that itself runs under Claude would inherit
 --- CLAUDE_CODE_CHILD_SESSION and stay hidden from `claude agents`, so create()
---- strips that marker (see below) to make each session an independent, trackable
---- agent.
+--- strips that marker to make each session an independent, trackable agent.
 local function refresh_busy_state()
   if fetch_inflight then return end
   fetch_inflight = true
@@ -145,8 +128,8 @@ local function refresh_busy_state()
   end)
 end
 
---- Stop the poll timer. Called when the last session closes; also resets the
---- cycle counter and busy state so a later start begins clean.
+--- Stop the poll timer; reset the cycle counter and busy state so a later
+--- start begins clean.
 local function stop_poll_timer()
   if poll_timer then
     poll_timer:stop()
@@ -169,12 +152,10 @@ local function poll_tick()
   vim.cmd('doautocmd User ClaudeSessionsTick')
   -- An agent actively working is the usual reason the working tree changes,
   -- so the diff panel tracks it: up → repaint per tick WHILE the agent works
-  -- (the tree can only be changing under its hands — an idle editor's tree is
-  -- static, so refreshing it 3x/sec bought nothing), slow-cycle otherwise;
-  -- down → probe+open on the slow sub-cycle (two git jobs), so a panel that
-  -- was never drawn (a clean workspace at open time) still appears when the
-  -- first change lands — a refresh-only call here would be a permanent no-op
-  -- then.
+  -- (an idle editor's tree is static, so refreshing it 3x/sec bought nothing),
+  -- slow-cycle otherwise; down → probe+open on the slow sub-cycle, so a panel
+  -- that was never drawn (a clean workspace at open time) still appears when
+  -- the first change lands.
   if M.is_visible() then
     if diff.active() then
       if any_busy or tick % FETCH_EVERY == 0 then diff.refresh() end
@@ -188,17 +169,15 @@ local function poll_tick()
   -- The blink phase is advanced inside statusline_indicator() (one toggle per
   -- actual render), so we only redraw here to keep a lively blink while busy.
   if any_busy then
-    -- Reload file buffers the agent is actively writing, skipping buffers
-    -- with uncommitted edits.
     if opts.auto_reload and tick % CHECK_EVERY == 0 then
-      vim.cmd('checktime')
+      vim.cmd('checktime') -- skip buffers with uncommitted edits
     end
     vim.cmd('redrawstatus')
   end
 end
 
 --- (Re)start the poll timer. Cheap while idle: a tick that finds no sessions
---- stops the timer again, so an editor with no sessions pays nothing.
+--- stops the timer again.
 local function start_poll_timer()
   if poll_timer then return end
   poll_timer = (vim.uv or vim.loop).new_timer()
@@ -225,7 +204,6 @@ local function displayed_session()
   return find_session(function(s) return window_open(s.term) end)
 end
 
---- Find the live session record for a toggleterm terminal, if any.
 local function session_for_term(term)
   return find_session(function(s) return s.term == term end)
 end
@@ -277,12 +255,10 @@ end
 --- Push the registry/window state to both panels: re-render their rows, or
 --- close them when nothing is displayed anymore. The diff panel shadows the
 --- session panel's visibility (its open/close decision is diff.sync's). The
---- hold for a session switch lives HERE — one guard, both halves (panel.switching):
---- panel.sync holds its own open through the churn, and the diff half must too,
---- or the churn's close_all_open_windows → panel_sync initiates a redundant
---- open mid-churn (show_session's own diff.open() then lands as a no-op there).
---- No hold inside diff.sync itself: the panels read each other only through
---- this module, which binds both — the churn owner's depth is the right one.
+--- hold for a session switch lives HERE — one guard, both halves
+--- (panel.switching): the churn's close_all_open_windows → panel_sync must
+--- not initiate a redundant open mid-churn (show_session's own diff.open()
+--- then lands as a no-op there).
 local function panel_sync()
   if panel.switching then return end -- mid-switch churn: show_session owns both halves
   panel.sync(M.is_visible())
@@ -295,7 +271,6 @@ panel.snapshot = function()
   for i, s in ipairs(sessions) do
     snap[i] = {
       busy = session_busy(s),
-      -- the CLI's own status string ('busy'/'idle'/...), for the panel's word
       state = session_state(s),
       open = window_open(s.term),
       -- the middle column shows `claude` until the session is renamed
@@ -325,8 +300,9 @@ end
 
 --- Close the window of every displayed toggleterm terminal except `keep`.
 --- Window-only: processes keep running. This guarantees the kept session alone
---- occupies the right side, and preserves the old zsh<->claude mutual exclusion
---- from util.toggle_term. Remembers the most recently closed session for <C-s>.
+--- occupies the right side, and preserves the old zsh<->claude mutual
+--- exclusion from util.toggle_term. Remembers the most recently closed
+--- session for <C-s>.
 local function close_all_open_windows(keep)
   local closed_any = false
   for _, term in ipairs(require('toggleterm.terminal').get_all()) do
@@ -348,15 +324,13 @@ end
 --- toggleterm's BufEnter handler (persist_mode = false -> start_in_insert =
 --- true) schedules a startinsert on every programmatic terminal switch; the
 --- scheduled call fires after this function returns, by which time the panel
---- has taken focus back, so insert lands on the panel and the statusline
---- flashes INSERT (or the nomodifiable panel takes the E21). eventignore
---- can't stop an already-scheduled callback, but it CAN stop the BufEnter
---- autocmd from scheduling one — it is honored while the autocmd fires, i.e.
---- inside the open below. The synchronous spawn-time startinsert
---- (setup_buffer_autocommands checks config.start_in_insert) is disarmed the
---- same way, for the brand-new-terminal path of the open. When the user opens
---- a session for real (<C-s>/<CR>/<C-a>) events flow normally and the
---- terminal starts in insert as usual.
+--- has taken focus back, so insert lands on the panel. eventignore can't stop
+--- an already-scheduled callback, but it CAN stop the BufEnter autocmd from
+--- scheduling one — it is honored while the autocmd fires, i.e. inside the
+--- open below. The synchronous spawn-time startinsert is disarmed the same
+--- way, for the brand-new-terminal path of the open. When the user opens a
+--- session for real (<C-s>/<CR>/<C-a>) events flow normally and the terminal
+--- starts in insert as usual.
 local function without_insert(stepping, open)
   if not stepping then
     open()
@@ -517,8 +491,7 @@ function M.close_current(target, close_opts)
   -- and swap the successor's buffer in (no window close/reopen, so the
   -- statusline and bufferline get a single clean update instead of
   -- flickering). Panel-driven: the cursor stays on the panel where the user
-  -- closed (rows shifted, refresh clamps it); the terminal takes insert mode
-  -- when the user next enters it.
+  -- closed (rows shifted, refresh clamps it).
   if U.valid_win(win) then
     close_all_open_windows(next_session.term)
     vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
@@ -653,10 +626,10 @@ end
 
 --- Statusline indicator: one dot per session.
 ---   •  window open (idle)        ◦  window closed (idle)
----   busy sessions blink — the dot shows on one refresh and disappears (a
----   blank of the same width) on the next, so a busy session reads as a
----   flashing dot. Width is kept stable across phases so neighbouring dots
----   don't shuffle left/right while blinking.
+--- busy sessions blink — the dot shows on one refresh and disappears (a
+--- blank of the same width) on the next, so a busy session reads as a
+--- flashing dot. Width is kept stable across phases so neighbouring dots
+--- don't shuffle left/right while blinking.
 function M.statusline_indicator()
   if #sessions == 0 then
     return ''

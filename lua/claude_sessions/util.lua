@@ -1,7 +1,8 @@
 -- Primitives shared by the two sidebar panels (panel.lua, diff.lua): window
--- lookups, the scratch buffers they render into, their plain window look and
--- the row rewrite both renders end with. Inert helpers — no state, no
--- lifecycle; the panels own theirs.
+-- lookups, the scratch buffers they render into, their plain window look, the
+-- row rewrite both renders end with, and the row↔entry mapping of the shared
+-- three-line row shape. Inert helpers — no state, no lifecycle; the panels own
+-- theirs.
 
 local U = {}
 
@@ -16,8 +17,7 @@ function U.valid_buf(buf)
 end
 
 --- Focus a window, if it is still there; `fallback` when it is not. Returns
---- whether focus landed on `win` — callers that must confirm the move (a
---- selection licensed by focus) re-check nothing.
+--- whether focus landed on `win`.
 function U.focus(win, fallback)
   if U.valid_win(win) and pcall(vim.api.nvim_set_current_win, win) then
     return vim.api.nvim_get_current_win() == win
@@ -28,7 +28,7 @@ function U.focus(win, fallback)
 end
 
 --- The current tab's real windows: non-floating, non-external — a floating
---- picker or external UI is someone else's UI, never a layout candidate.
+--- picker is someone else's UI, never a layout candidate.
 function U.real_windows()
   local wins = {}
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
@@ -64,21 +64,19 @@ function U.tree_window()
 end
 
 --- The plugin's notify convention: `msg` under the 'claude sessions' title,
---- at `level` (INFO when none). One spelling, so the title lives here.
+--- at `level` (INFO when none).
 function U.notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
 end
 
 --- Run `args` on a job and hand its stdout (joined, one row per output line)
 --- to `cb` when it exits 0, else nil. Non-blocking; the callback lands
---- scheduled. A failed spawn (the command gone from PATH, a bad spec) lands
---- nil too — callers gate on the value, never on an error.
+--- scheduled. A failed spawn (the command gone from PATH) lands nil too —
+--- callers gate on the value, never on an error.
 function U.job(args, cb)
   local stdout = {}
   local ok, job_id = pcall(vim.fn.jobstart, args, {
     stdout_buffered = true,
-    -- Chunks arrive as lines with the newlines dropped; join them back so a
-    -- multi-row output (one numstat row per file) parses one row per line.
     on_stdout = function(_, data)
       if data then vim.list_extend(stdout, data) end
     end,
@@ -92,9 +90,8 @@ function U.job(args, cb)
   end
 end
 
--- Both panels render THREE buffer lines per entry — a name row, a detail row
--- (state word / counts), a blank separator — so their row↔entry mapping is
--- shared here.
+-- Both panels render THREE buffer lines per entry — a name/symbol row, a
+-- detail row, a blank separator — so their row↔entry mapping is shared here.
 
 --- First buffer line (1-based) of entry `i` — the name/symbol row.
 function U.entry_line(i)
@@ -115,10 +112,19 @@ end
 --- Display width of a short panel string. Every rune the panels draw (gutter
 --- arrow, state symbols, spinner frames, the bar's boxes) is single-width,
 --- but NOT single-BYTE — `ᐅ`/`✓`/`⠋`/`▪` are 3 bytes — so padding and extmark
---- columns need the rune count, not `#`. (`vim.fn.strdisplaywidth` would also
---- do; this stays exact for the strings we render.)
+--- columns need the rune count, not `#`.
 function U.rune_len(str)
   return vim.fn.strcharlen(str)
+end
+
+--- Right-pad `s` with spaces to `width` display columns (a no-op past width).
+--- Full-width rows are how a selected entry's block background spans its
+--- panel: a plain row mark stops at the row's own end, so the row itself is
+--- padded rather than extended with hl_eol (whose semantics proved
+--- unreliable across nvim builds).
+function U.pad_to(s, width)
+  local pad = math.max(width - U.rune_len(s), 0)
+  return pad > 0 and s .. string.rep(' ', pad) or s
 end
 
 --- A hidden scratch buffer a panel renders into.
@@ -164,17 +170,15 @@ end
 --- Calibrate the sidebar stack (the tree + the panels split below it) to
 --- thirds: every window but the first takes floor(rows / 3); the first (the
 --- tree) takes the remainder — the stack's largest share, never crushed. The
---- rows are read from the stack itself: a column's window heights span the
---- frame rows, so the sum is conserved across the assertions, and rows derived
---- from o.lines can disagree with the stack whenever cmdline/frame churn
---- shifted them. A win_set_height redistributes within the stack (the nearest
---- neighbour pays first), so the assertions are ITERATED until exact, then the
---- windows are repinned. NO restack — wincmd J moves the current window to the
---- bottom of the full-width FRAME, not its own column, so in a real session
---- (the session terminal in a column on the right) it pulls the sidebar
---- windows across full width and wrecks the layout. Windows that are not up
---- (a panel still to open) are skipped — their own open() calibrates the full
---- stack.
+--- rows are read from the stack itself: rows derived from o.lines can
+--- disagree with it whenever cmdline/frame churn shifted them. A
+--- win_set_height redistributes within the stack (the nearest neighbour pays
+--- first), so the assertion is ITERATED until exact, then the windows are
+--- repinned. NO restack — wincmd J moves the current window to the bottom of
+--- the full-width FRAME, not its own column, so in a real session it pulls
+--- the sidebar windows across full width and wrecks the layout. Windows that
+--- are not up (a panel still to open) are skipped — their own open()
+--- calibrates the full stack.
 function U.calibrate_sidebar(...)
   local up = {}
   for _, w in ipairs({ ... }) do
@@ -195,10 +199,8 @@ function U.calibrate_sidebar(...)
   for i, w in ipairs(up) do
     targets[w] = (i == 1) and (rows - panels * third) or third
   end
-  -- Iterate: assert every window to its target, re-read, repeat until exact
-  -- (each pass's redistribution lands closer; the leftovers correct on the
-  -- next). Capped so a stack that won't converge (a window clamped at min 1)
-  -- still repins.
+  -- Capped so a stack that won't converge (a window clamped at min 1) still
+  -- repins.
   for _ = 1, 8 do
     local exact = true
     for _, w in ipairs(up) do
@@ -234,8 +236,7 @@ end
 -- nomodifiable one nvim refuses them with a noisy E21. Silence the common
 -- ones FIRST so a panel's functional maps win; everything else keeps its
 -- default. NOT silenced: <C-a> — the global mapping creates a session, and
--- that must work with the cursor on a panel too. (Also silenced by the diff
--- panel: j/k move its cursor, not insert.)
+-- that must work with the cursor on a panel too.
 local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u' }
 
 --- Silence the editing keys on a read-only panel buffer (see SILENCED_KEYS).

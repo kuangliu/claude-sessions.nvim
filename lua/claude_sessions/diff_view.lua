@@ -1,8 +1,8 @@
--- The diff pane: when the sidebar diff panel selects a file (an explicit
--- j/k or <C-e> — the panel's opening never selects), the file's
+-- The diff pane: when the sidebar diff panel selects a file (an explicit j/k
+-- or <C-e> — the panel's opening never selects), the file's
 -- working-tree-vs-HEAD diff is rendered here via diffview.nvim's engine — the
--- same GitHub-style unified view the review shows (full-file, word-diffed,
--- treesitter-lifted, gitsigns gutter bars, hunk navigation).
+-- same GitHub-style unified view (full-file, word-diffed, treesitter-lifted,
+-- gitsigns gutter bars, hunk navigation).
 --
 -- The adapter owns only the plumbing around the engine: resolve the HEAD and
 -- working copies, build the view rows, paint them into a scratch buffer, and
@@ -39,11 +39,6 @@ if ok then
   git = require('diffview.git')
 end
 
--- Engine available? One gate for every entry.
-local function engine()
-  return ok and render and git
-end
-
 --- Is the pane window (still) up? The gate for every entry here, and the one
 --- read diff.lua's focus pass makes: a focus flip may only re-render a LIVE
 --- pane — a dismissal (the q keymap, a manual window close) must not be
@@ -59,8 +54,6 @@ end
 -- these keys, so the pane's look can never leak onto the user's window.
 local PANE_LOOK = U.plain_look({ signcolumn = 'yes:1' })
 
--- Pane window look: the diff is plain text like the sidebar panels (nothing
--- decorates its edges), no numbers — the header row carries the counts.
 local function plain_diff_window(win)
   U.apply_winopts(win, PANE_LOOK)
 end
@@ -99,9 +92,9 @@ end
 -- Build the view buffer once: a named nofile scratch in diffview's shape —
 -- the same look view.lua gives its view buffers (and the b-vars render.render
 -- writes are what the hunk-jump scan below reads). The buffer survives across
--- shows (bufhidden=hide), so its birth state lives here: the keymaps, and the
--- one WinClosed that forgets/rehomes when the pane window dies on its own —
--- per pane buffer, not per show (per-show would stack one autocmd per reopen
+-- shows (bufhidden=hide), so its birth state lives here — the keymaps, and
+-- the one WinClosed that forgets/rehomes when the pane window dies on its own
+-- (per pane buffer, not per show: per-show would stack one autocmd per reopen
 -- cycle on this long-lived buffer).
 local function create_buf()
   local buf = vim.api.nvim_create_buf(false, true)
@@ -174,7 +167,6 @@ local function jump_to_source()
   -- The pane's window swaps to the real file (diffview's own <CR> swaps the
   -- diff window's content the same way); the pane's WINDOW stays — the next
   -- selection re-renders its diff over the file, so the layout never churns.
-  -- M.win is still the window, so the next show() reuses it in place.
   vim.cmd('edit ' .. vim.fn.fnameescape(abspath))
   if target then
     vim.api.nvim_win_set_cursor(0, { target, 0 })
@@ -193,10 +185,9 @@ end
 
 --- The editor window the pane takes over: a real (non-floating) window whose
 --- buffer is a NORMAL one — no terminal, no qf/help, nothing of the sessions
---- layout (the tree, the panels and the session terminals are nofile/terminal
---- buffers, all failing this gate). The LARGEST such window wins: the main
---- editor area, when several code windows share the row. Nil when the screen
---- holds nothing but the sessions layout.
+--- layout. The LARGEST such window wins: the main editor area, when several
+--- code windows share the row. Nil when the screen holds nothing but the
+--- sessions layout.
 local function editor_window()
   local best, best_area = nil, -1
   for _, w in ipairs(U.real_windows()) do
@@ -213,10 +204,9 @@ end
 --- still up; else TAKE OVER an editor window (the user's file steps aside —
 --- buffer, cursor and window options remembered in M.replaced; restore is
 --- release's job); else — nothing but the sessions layout on screen — split
---- one off the session terminal's window (the right side is the terminal's —
---- the pane splits it in place, keeping the layout the sessions plugin owns),
---- seeded at the terminal's own width (`columns * 0.4`, the sessions config's
---- vertical size), so the pane and the terminal read as one pair.
+--- one beside the session terminal, seeded at the terminal's own width
+--- (`columns * 0.4`, the sessions config's vertical size), so the pane and
+--- the terminal read as one pair.
 local function show_window(buf)
   if M.active() then
     if vim.api.nvim_win_get_buf(M.win) ~= buf then
@@ -241,18 +231,16 @@ local function show_window(buf)
     }
     win = editor
   else
-    -- Host for the split: a displayed session window keeps the pane beside the
-    -- terminal — BETWEEN the tree and the terminal (tree → pane → terminal, the
-    -- sidebar's file list reading straight into its diff), not the far right
-    -- the global `splitright` would put it. `splitright = false` while the
-    -- split lands puts the pane on the terminal's left; the one-split flip is
-    -- restored before anything else can read it. No session on screen: plain
-    -- vsplit from where we are.
+    -- Host for the split: a displayed session window keeps the pane beside
+    -- the terminal — BETWEEN the tree and the terminal (the sidebar's file
+    -- list reading straight into its diff), not the far right the global
+    -- `splitright` would put it. `splitright = false` while the split lands
+    -- puts the pane on the terminal's left; the one-split flip is restored
+    -- before anything else can read it. No session on screen: plain vsplit
+    -- from where we are.
     local host = U.window_with_filetype('claude')
     local prev = vim.api.nvim_get_current_win()
     U.focus(host)
-    -- Seed the width like the terminal's own: `columns * 0.4` (the sessions
-    -- config's vertical size), so the pane and the terminal read as one pair.
     local splitright = vim.o.splitright
     vim.o.splitright = false
     vim.cmd('40vsplit')
@@ -277,7 +265,7 @@ end
 --- engine (diffview absent) or a root. Reuses the pane window and buffer
 --- across calls, so stepping files re-renders in place.
 function M.show(abspath, root)
-  if not (engine() and abspath and root) then return end
+  if not (ok and render and git and abspath and root) then return end
   -- Same-target skip: the pane already shows this file's diff — a focus
   -- arrival re-selects the landed entry on every flip, and a step lands a
   -- file the pane may already be showing (a wrapped cycle revisits file
@@ -287,19 +275,18 @@ function M.show(abspath, root)
       and last_target.root == root then
     return
   end
-  -- The render can flip focus twice (the split path's host move to the
-  -- terminal and hand-back; the take-over path flips none). The diff panel's
-  -- focus-flip pass sees those flips as arrivals/departures, but neither half
-  -- holds a state to flip — the panel's selection is pinned, and a departure
-  -- spells no close — so the flip pair lands a repaint either way and stands.
+  -- The render can flip focus twice (the split path's host move and
+  -- hand-back); the diff panel's focus-flip pass sees those as
+  -- arrivals/departures, but neither half holds a state to flip — the panel's
+  -- selection is pinned and a departure spells no close — so the flip pair
+  -- lands a repaint either way and stands.
   last_target = { abspath = abspath, root = root }
-  local toplevel = root
-  local rel = git.relpath(toplevel, abspath)
+  local rel = git.relpath(root, abspath)
 
-  local old_raw = git.git_show_raw(toplevel, 'HEAD:' .. rel) -- nil for untracked files
-  local new_raw = git.read_file_raw(toplevel .. '/' .. rel) -- nil for deleted files
+  local old_raw = git.git_show_raw(root, 'HEAD:' .. rel) -- nil for untracked files
+  local new_raw = git.read_file_raw(root .. '/' .. rel) -- nil for deleted files
   local rows, counts
-  if git.is_binary(toplevel, rel, toplevel .. '/' .. rel) then
+  if git.is_binary(root, rel, root .. '/' .. rel) then
     rows = { render.row('Binary file differs (not shown)', 'del', nil, 1) }
     counts = { add = 0, del = 1 }
   else
@@ -308,14 +295,14 @@ function M.show(abspath, root)
   end
 
   local buf = M.buf
-  if not (U.valid_buf(buf)) then
+  if not U.valid_buf(buf) then
     buf = create_buf()
     set_keymaps(buf)
     M.buf = buf
   end
-  render.render(buf, toplevel .. '/' .. rel, rel, rows, counts)
+  render.render(buf, root .. '/' .. rel, rel, rows, counts)
   -- treesitter lifting reads raw content again; spell the sides once more
-  render.apply_treesitter(buf, toplevel .. '/' .. rel, rows, old_raw, new_raw)
+  render.apply_treesitter(buf, root .. '/' .. rel, rows, old_raw, new_raw)
   show_window(buf)
 
   -- Land the cursor on the first change (the header's end runs into it), so

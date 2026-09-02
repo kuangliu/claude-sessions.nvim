@@ -17,13 +17,12 @@
 
 local M = {}
 
-local U = require('claude_sessions.util') -- shared window/buffer helpers
+local U = require('claude_sessions.util')
 
 -- Bound by the main module: `snapshot()` returns the live sessions as an
 -- array of { busy = bool, open = bool, name = string? } (array index ==
 -- session number), `show(i)` displays session i, `close_session(i)` kills
 -- session i, and `rename_session(i, name)` renames it.
--- (Named close_session: M.close below tears the panel itself down.)
 M.snapshot = nil
 M.show = nil
 M.close_session = nil
@@ -61,42 +60,34 @@ local renaming = nil
 local FLOOR_KEYS = { '<BS>', '<C-w>' }
 
 -- Layout, Claude-Code session-picker style. Session n owns buffer lines
--- 3n-2 (symbol + name) and 3n-1 (state word, indented under the name), with a
--- blank separator line at 3n between entries:
+-- 3n-2 (symbol + name) and 3n-1 (state word), with a blank separator at 3n:
 --   ' ᐅ  ✓  claude'
 --   '       idle'
 --   ''
--- The cursor sits on the SYMBOL line; any line (a separator attributes to the
--- entry above it) maps back to its session — the same three-line shape the
--- diff panel renders, so util's entry_line/line_entry apply. Both gutter
--- spellings are FOUR display columns wide (ᐅ is 3 bytes / 1 display
--- column — and extmark columns are BYTE offsets — so the marked row's later
--- columns sit 2 bytes further out than the blank gutter's).
+-- The cursor sits on the SYMBOL line; any line maps back to its session via
+-- util's row↔entry helpers (the same three-line shape the diff panel
+-- renders). Both gutter spellings are FOUR display columns wide (ᐅ is 3
+-- bytes / 1 display column — and extmark columns are BYTE offsets — so the
+-- marked row's later columns sit 2 bytes further out than the blank gutter's).
 local ARROW_GUTTER = ' ᐅ  '
 local BLANK_GUTTER = '    '
-local GUTTER_COLS = 4 -- display width of EITHER gutter spelling (ᐅ is 3 bytes)
 local SYM_GAP = 2 -- spaces between the state symbol and the name
 local SYM_IDLE = '✓' -- agent idle; busy sessions spin through SPIN_FRAMES
 local WORD_PAD = 7 -- state-word indent: gutter (4) + symbol (1) + gap (2)
 
--- The panel's three-line row shape is util's (name / detail / blank), so its
--- row↔entry mapping applies directly — aliased once here, the ~12 call sites
--- spell the short names. `rune_len` rides along (the panel's local copy is
--- folded into the alias — one spelling of the rune-vs-byte rule, in util).
-local entry_line, line_entry, rune_len = U.entry_line, U.line_entry, U.rune_len
+local entry_line, line_entry = U.entry_line, U.line_entry
 
 local function define_highlights()
   -- Same accent blue as diffview's commit hashes for the arrow. The state
   -- colors follow Claude Code's picker: red blocked, green idle, yellow
-  -- working/busy.
+  -- working/busy; names bold like the picker's. The selected entry's block
+  -- background is a faint read on top of the normal background, so the state
+  -- colors stay legible.
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelArrow', { fg = '#61afef' })
-  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#e5c07b' }) -- working: yellow
-  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#98c379' }) -- idle: green
-  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBlocked', { fg = '#e06c75' }) -- blocked: red
-  -- Session names, bold like the picker's.
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBusy', { fg = '#e5c07b' })
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelIdle', { fg = '#98c379' })
+  vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelBlocked', { fg = '#e06c75' })
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelName', { bold = true })
-  -- The selected entry's two-line block background: a faint read on top of
-  -- the normal background, so the state colors stay legible.
   vim.api.nvim_set_hl(0, 'ClaudeSessionsPanelCursor', { bg = '#2c313c' })
 end
 
@@ -106,8 +97,7 @@ local function active()
 end
 
 --- The live rows as an always-indexable array. Empty until the main module
---- binds the hook — the panel is inert before that, and every reader here
---- (spinner tick, keymaps, refresh) wants rows without a nil check.
+--- binds the hook — the panel is inert before that.
 local function snapshot()
   return M.snapshot and M.snapshot() or {}
 end
@@ -129,8 +119,7 @@ end
 --- One event-loop pass from now: leave insert and put focus back on the
 --- panel. Runs FIFO behind any startinsert closures toggleterm queued behind
 --- a programmatic switch — those fire while the just-opened terminal still
---- holds focus, where they are harmless; even a stray insert that lands on
---- the panel lives for microseconds and is never painted.
+--- holds focus, where they are harmless.
 function M.reclaim_focus()
   vim.schedule(function()
     if not active() then return end
@@ -144,8 +133,8 @@ end
 -- State styling: symbol, word shown on the second line, and the highlight
 -- group for symbol + word, keyed by the CLI's status string. `busy` is
 -- working (yellow, spinning braille); `waiting` — an agent parked on a
--- permission prompt — is blocked (a static red ◉, like the picker's);
--- anything unknown falls back to idle (green ✓).
+-- permission prompt — is blocked (a static red ◉); anything unknown falls
+-- back to idle (green ✓).
 local STATE_STYLE = {
   busy = { sym = nil, word = 'busy', hl = 'ClaudeSessionsPanelBusy', spin = true },
   waiting = { sym = '◉', word = 'blocked', hl = 'ClaudeSessionsPanelBlocked' },
@@ -165,17 +154,16 @@ local function row_state(s, pin_row, i)
 end
 
 -- Spinner. The WORKING state's symbol is a rotating braille frame; the timer
--- below advances it one frame per SPIN_MS while the panel is open and a
--- spinning state is on the list — an idle panel pays nothing. The frames are
--- all single display columns, so the layout never shifts between frames.
+-- advances it one frame per SPIN_MS while the panel is open and a spinning
+-- state is on the list — an idle panel pays nothing. The frames are all
+-- single display columns, so the layout never shifts between frames. The tick
+-- itself stops the timer when nothing is busy anymore, so no stop
+-- bookkeeping is needed on the busy->idle edge.
 local SPIN_FRAMES = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' }
 local SPIN_MS = 100
 local spin_phase = 1 -- index into SPIN_FRAMES
 local spin_timer ---@type uv.uv_timer_t?
 
---- Start the spinner timer if it is not already running. Called from render
---- when a session is busy; the tick itself stops the timer when nothing is
---- busy anymore, so no stop bookkeeping is needed on the busy->idle edge.
 local function start_spinner()
   if spin_timer then return end
   spin_timer = (vim.uv or vim.loop).new_timer()
@@ -205,19 +193,14 @@ end
 -- Rewrite the rows and their highlights. The ᐅ in the leading gutter marks a
 -- session — the DISPLAYED one by default, or `pin_row` while a debounced step
 -- is in flight so the marker moves with the cursor instead of trailing it.
--- The name column shows the session's custom name once one is set with `r`;
--- the default is just `claude` (the cursor and window layout tell sessions
--- apart).
+-- Both lines of every entry are padded to the panel window's DISPLAY width
+-- (U.pad_to), so the selected entry's block background is two plain
+-- single-line extmarks running the full row. Extmark columns stay BYTE
+-- offsets; the width/pad arithmetic is in columns.
 local function render(buf, snap, pin_row)
   local lines = {}
   local marks = {}
   local any_spinning = false
-  -- Both lines of every entry are padded to the panel window's DISPLAY width,
-  -- so the selected entry's block background is two PLAIN single-line extmarks
-  -- running the full row. No hl_eol: its semantics proved unreliable across
-  -- nvim builds (a mark's final line is clipped to end_col and the EOL
-  -- continuation misbehaves) — padded text needs no extension at all.
-  -- Extmark columns stay BYTE offsets; the width/pad arithmetic is in columns.
   local width = active() and vim.api.nvim_win_get_width(M.win) or 80
   -- One resolved view per entry, shared by the line pass and the mark pass:
   -- the state style, whether the ᐅ marks it, and the symbol/gutter/name
@@ -225,8 +208,7 @@ local function render(buf, snap, pin_row)
   local views = {}
   for i, s in ipairs(snap) do
     local style, marked = row_state(s, pin_row, i)
-    -- nil sym = the working state's spinner frame
-    local sym = style.sym or SPIN_FRAMES[spin_phase]
+    local sym = style.sym or SPIN_FRAMES[spin_phase] -- nil sym = the spinner frame
     any_spinning = any_spinning or style.spin
     views[i] = {
       style = style,
@@ -237,15 +219,11 @@ local function render(buf, snap, pin_row)
     }
   end
   for i, v in ipairs(views) do
-    -- Columns, not bytes: the arrow gutter is 5 bytes / 4 columns.
-    local pad = string.rep(' ',
-      math.max(width - GUTTER_COLS - rune_len(v.sym) - SYM_GAP - rune_len(v.name), 0))
-    lines[entry_line(i)] = v.gutter .. v.sym .. string.rep(' ', SYM_GAP) .. v.name .. pad
+    lines[entry_line(i)] = U.pad_to(
+      v.gutter .. v.sym .. string.rep(' ', SYM_GAP) .. v.name, width)
     local word_line = string.rep(' ', WORD_PAD) .. v.style.word
-    lines[entry_line(i) + 1] = word_line .. string.rep(' ', math.max(width - #word_line, 0))
-    -- a blank separator line below every entry (a trailing one too: it never
-    -- shows, and dropping it per-entry costs a modulo in a hot-ish loop)
-    lines[entry_line(i) + 2] = ''
+    lines[entry_line(i) + 1] = U.pad_to(word_line, width)
+    lines[entry_line(i) + 2] = '' -- a blank separator below every entry
   end
   -- The extmarks that color the pieces of every row: the selected entry's
   -- block background (one full-width background mark per line — the lines
@@ -254,49 +232,30 @@ local function render(buf, snap, pin_row)
   -- the session name in bold. All columns are BYTE offsets of their row.
   for i, v in ipairs(views) do
     local lnum = entry_line(i) - 1 -- 0-based symbol line
-    -- Byte offsets for the marks: gutter/symbol/name segments of the line.
     local sym_col = #v.gutter
     local name_col = sym_col + #v.sym + SYM_GAP
     if v.marked then
-      marks[#marks + 1] = {
-        lnum = lnum, col = 0, end_col = #lines[lnum + 1],
-        hl = 'ClaudeSessionsPanelCursor',
-      }
-      marks[#marks + 1] = {
-        lnum = lnum + 1, col = 0, end_col = #lines[lnum + 2],
-        hl = 'ClaudeSessionsPanelCursor',
-      }
+      marks[#marks + 1] = { lnum = lnum, col = 0, end_col = #lines[lnum + 1], hl = 'ClaudeSessionsPanelCursor' }
+      marks[#marks + 1] = { lnum = lnum + 1, col = 0, end_col = #lines[lnum + 2], hl = 'ClaudeSessionsPanelCursor' }
       -- col 1..4: one space, then the 3-byte ᐅ
-      marks[#marks + 1] = {
-        lnum = lnum, col = 1, end_col = 1 + #'ᐅ', hl = 'ClaudeSessionsPanelArrow',
-      }
+      marks[#marks + 1] = { lnum = lnum, col = 1, end_col = 1 + #'ᐅ', hl = 'ClaudeSessionsPanelArrow' }
     end
     -- the state symbol, in the state's color (ends before the 2-space gap)
-    marks[#marks + 1] = {
-      lnum = lnum, col = sym_col, end_col = sym_col + #v.sym, hl = v.style.hl,
-    }
+    marks[#marks + 1] = { lnum = lnum, col = sym_col, end_col = sym_col + #v.sym, hl = v.style.hl }
     -- the session name, in bold
-    marks[#marks + 1] = {
-      lnum = lnum, col = name_col, end_col = name_col + #v.name,
-      hl = 'ClaudeSessionsPanelName',
-    }
+    marks[#marks + 1] = { lnum = lnum, col = name_col, end_col = name_col + #v.name, hl = 'ClaudeSessionsPanelName' }
     -- the state word on the line below, in the same color
-    marks[#marks + 1] = {
-      lnum = lnum + 1, col = WORD_PAD, end_col = WORD_PAD + #v.style.word,
-      hl = v.style.hl,
-    }
+    marks[#marks + 1] = { lnum = lnum + 1, col = WORD_PAD, end_col = WORD_PAD + #v.style.word, hl = v.style.hl }
   end
-  -- util's rewrite helper — the same clear/set/land the diff panel's render
-  -- ends with (set_lines marks every row changed, so the rows land locked).
   U.set_rows(buf, ns, lines, marks)
   if any_spinning then start_spinner() end
 end
 
 --- Move the panel cursor to the symbol line of the DISPLAYED session — the
 --- entry the block background is drawn on — so the raw editor cursor never
---- sits beside an unhighlighted row (a stray block on the left edge). Two
---- callers, one job: after a switch settles (`follow`) and after any refresh
---- with no step in flight (stepping holds the cursor where the user put it).
+--- sits beside an unhighlighted row. After a switch settles (`follow`) and
+--- after any refresh with no step in flight (stepping holds the cursor where
+--- the user put it).
 local function follow_displayed(snap)
   for i, s in ipairs(snap) do
     if s.open then
@@ -374,8 +333,8 @@ end
 --- End the in-place rename. `apply` commits the row's current text as the new
 --- name (empty restores the default `claude`); otherwise the edit is
 --- discarded. Either way: leave insert, remove the backspace floor mapping,
---- re-arm the mode guard, re-lock the buffer, and re-render the rows (which
---- also repairs anything else the edit touched).
+--- re-lock the buffer, and re-render the rows (which also repairs anything
+--- else the edit touched).
 local function finish_rename(apply)
   if not renaming then return end
   local r = renaming
@@ -410,9 +369,8 @@ local function rename_current_row()
   if not s then return end
   local name = s.name or 'claude'
   local lnum = entry_line(row) - 1 -- 0-based symbol line
-  -- The name starts after the gutter, the state symbol and the gap. The
-  -- symbol can be a 3-byte spinner frame mid-animation, so the name's byte
-  -- offset is read off the row: find the name text after the leading
+  -- The symbol can be a 3-byte spinner frame mid-animation, so the name's
+  -- byte offset is read off the row: find the name text after the leading
   -- gutter..symbol..gap prefix.
   local line = vim.api.nvim_buf_get_lines(M.buf, lnum, lnum + 1, false)[1] or ''
   local name_col = line:find(name, 1, true)
@@ -473,17 +431,13 @@ function M.refresh()
   local line = vim.api.nvim_win_get_cursor(M.win)[1]
   render(M.buf, snap, arrow_row)
   -- Keep the cursor on a SYMBOL line: clamp to the list (the last entry's
-  -- symbol line — util's mapping, spelled entry_line(#snap); the raw `3n-2`
-  -- it replaces), then snap back to the same entry's symbol line (a raw
-  -- clamp can land on a state-word or separator line). One line SHORT of it
-  -- (`- 1`) is what broke j/k for months: a cursor on the last entry's
-  -- symbol line clamped to the separator above and snapped to entry n-1 —
-  -- with two sessions every refresh yanked the cursor back to entry 1, so
-  -- the list would not step at all.
-  line = math.min(math.max(line, 1), U.entry_line(#snap))
+  -- symbol line), then snap back to the same entry's symbol line (a raw
+  -- clamp can land on a state-word or separator line — a clamp one line
+  -- SHORT of the symbol line is what broke j/k for months).
+  line = math.min(math.max(line, 1), entry_line(#snap))
   pcall(vim.api.nvim_win_set_cursor, M.win, { entry_line(line_entry(line)), 0 })
   -- No step in flight: rest the cursor on the displayed session's entry so it
-  -- never sits beside an unhighlighted row (the stray block on the left).
+  -- never sits beside an unhighlighted row.
   if not arrow_row then follow_displayed(snap) end
 end
 
@@ -508,12 +462,9 @@ function M.follow()
   follow_displayed(snapshot())
 end
 
--- Panel keymaps. Editing keys have no business here, and on a nomodifiable
--- buffer nvim refuses them with a noisy E21 (the reported error). Silence the
--- common ones FIRST (util's shared list — the diff panel silences the same
--- ones, minus its own j/k cursor moves) so the functional maps below win;
--- everything else keeps its default. NOT silenced: <C-a> — the global mapping
--- creates a session, and that must work with the cursor on the panel too.
+-- Panel keymaps. Editing keys are silenced first (util's shared list) so the
+-- functional maps below win. NOT silenced: <C-a> — the global mapping creates
+-- a session, and that must work with the cursor on the panel too.
 local function set_keymaps(buf)
   U.silence_editing_keys(buf)
   local function map(key, fn, desc)
@@ -560,9 +511,7 @@ function M.open()
   vim.cmd('below ' .. height .. 'split')
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
-  -- The split below the tree inherits the tree window's options; the panel is
-  -- plain text (util's helper — the diff panel applies the same look).
-  U.plain_text_window(win)
+  U.plain_text_window(win) -- the split inherits the tree's options; the panel is plain text
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
 
   M.buf, M.win = buf, win
@@ -584,15 +533,13 @@ end
 -- on the next keypress). Nothing in the autocmd system can intercept the
 -- command itself before it runs (InsertEnter/ModeChanged fire after the mode
 -- change), so intercept at the one seam we own: vim.cmd, while the panel is
--- the focused window. Calls from anywhere else pass straight through.
+-- the focused window. Calls from anywhere else pass straight through. The
+-- diff panel (a different buffer, a different filetype) is covered by the
+-- same guard.
 local function install_mode_guard()
   -- Every hook below shares one predicate: an insert the panel does not want
   -- — one that lands on one of the frame's read-only panel buffers while no
-  -- rename is in flight (a rename's own insert is deliberate and passes; see
-  -- `renaming` above). The diff panel (the sidebar's changed-files list) is a
-  -- different buffer with a different filetype — a late toggleterm closure
-  -- spells startinsert on IT too, and the same INSERT flash / E21 lands
-  -- there. Both spellings share the guard.
+  -- rename is in flight (a rename's own insert is deliberate and passes).
   local PANEL_FTS = { 'claude-sessions-panel', 'claude-sessions-diff' }
   local function stray_insert(buf)
     if renaming then return false end
@@ -604,24 +551,17 @@ local function install_mode_guard()
   end
 
   -- Root interception: the stray call is literally `vim.cmd('startinsert')`
-  -- from a toggleterm closure, and when the panel holds focus that command
-  -- would either enter insert on this buffer or (on a nomodifiable buffer)
-  -- raise E21 as its error message — the reported crash. Intercept it at the
-  -- one seam we own, while the panel is the focused buffer, and drop it:
-  -- no mode change, no error. Calls from every other context pass through.
+  -- from a toggleterm closure. The stock vim.cmd is a table with __call/
+  -- __index metatable functions: __call handles `vim.cmd('...')`, __index
+  -- resolves `vim.cmd.highlight(...)` per-command functions — the
+  -- replacement must keep that exact shape or every such plugin breaks.
   local orig_cmd = vim.cmd
-  -- Matches both `vim.cmd('startinsert')` and the `vim.cmd{cmd=...}` table form.
   local function is_startinsert(cmd)
     if type(cmd) == 'string' then
       return cmd:find('^starti') ~= nil
     end
     return type(cmd) == 'table' and type(cmd.cmd) == 'string' and cmd.cmd:find('^starti') ~= nil
   end
-  -- The stock vim.cmd is a table with __call/__index metatable functions:
-  -- __call handles `vim.cmd('...')`, __index resolves `vim.cmd.highlight(...)`
-  -- per-command functions — nvim-surround's plugin file does exactly that on
-  -- load. The replacement must keep that exact shape or every such plugin
-  -- breaks with "attempt to index field 'cmd'".
   ---@diagnostic disable-next-line: duplicate-set-field
   vim.cmd = setmetatable({}, {
     __call = function(_, cmd, ...)
@@ -640,11 +580,14 @@ local function install_mode_guard()
   })
 
   -- Belt: insert mode entering on the panel is left immediately. InsertEnter
-  -- fires BEFORE the new mode is observable — vim.fn.mode() still reads 'n'
-  -- inside the callback — so a mode check here would never fire; the event
-  -- itself IS the signal, stopinsert unconditionally. Modifiable is flipped
-  -- on for the duration so edits queued by a race ahead of the vim.cmd guard
-  -- above are absorbed without E21, and restored on leave.
+  -- fires BEFORE the new mode is observable — a mode check inside it would
+  -- never fire; the event itself IS the signal, stopinsert unconditionally.
+  -- Modifiable is flipped on for the duration so edits queued by a race
+  -- ahead of the vim.cmd guard are absorbed without E21, and restored on
+  -- leave. The rename's own lifecycle (cancel, modifiable restore) is the
+  -- session panel's spelling — the diff panels spell none (they are ALWAYS
+  -- nomodifiable; U.set_rows owns their flips), so their leave just restores
+  -- nomodifiable.
   vim.api.nvim_create_autocmd('InsertEnter', {
     callback = function(ev)
       if not stray_insert(ev.buf) then return end
@@ -654,10 +597,6 @@ local function install_mode_guard()
   })
   vim.api.nvim_create_autocmd('InsertLeave', {
     callback = function(ev)
-      -- The rename's own lifecycle (cancel, modifiable restore) is the
-      -- session panel's spelling — the diff panels spell none (they are
-      -- ALWAYS nomodifiable; U.set_rows owns their flips), so their leave
-      -- just restores nomodifiable.
       if vim.bo[ev.buf].filetype == 'claude-sessions-diff' then
         vim.bo[ev.buf].modifiable = false
         return
@@ -678,8 +617,7 @@ local function install_mode_guard()
       if stray_insert(0) then vim.cmd('stopinsert') end
     end,
   })
-  -- If insert still managed to land (a render window with modifiable=true,
-  -- a race ahead of the guards above), queued keys would edit this buffer —
+  -- If insert still managed to land, queued keys would edit this buffer —
   -- blank every char before it lands.
   vim.api.nvim_create_autocmd('InsertCharPre', {
     callback = function()
@@ -688,8 +626,7 @@ local function install_mode_guard()
   })
   -- Braces: a stray startinsert can also slip through between events; the
   -- poll loop (300ms, only while sessions exist) notices a panel stuck in
-  -- insert and evicts it. Cheap: one mode + filetype check per tick. The
-  -- rename's own insert is exempt (renaming set).
+  -- insert and evicts it. Cheap: one mode + filetype check per tick.
   vim.api.nvim_create_autocmd('User', {
     pattern = 'ClaudeSessionsTick',
     callback = function()
@@ -699,8 +636,7 @@ local function install_mode_guard()
   })
 end
 
--- Highlights are (re)defined on setup and on every colorscheme change, like
--- diffview's groups.
+-- Highlights are (re)defined on setup and on every colorscheme change.
 function M.setup()
   define_highlights()
   vim.api.nvim_create_autocmd('ColorScheme', { callback = define_highlights })
@@ -713,9 +649,8 @@ function M.setup()
     pattern = 'NvimTree',
     callback = function()
       vim.schedule(function()
-        local snap = snapshot()
         local visible = false
-        for _, s in ipairs(snap) do
+        for _, s in ipairs(snapshot()) do
           visible = visible or s.open
         end
         if not visible then return end
@@ -731,10 +666,10 @@ function M.setup()
     end,
   })
   -- Tree closed (<Leader>f toggle, :NvimTreeClose, q in the tree): the panel
-  -- split below it goes with it. view.close() only closes the tree window (the
-  -- NvimTree buffer survives for the next toggle), so the reliable signal is
-  -- WinClosed for a window showing the tree's buffer. Match any window id and
-  -- check the buffer inside — the WinClosed pattern is the window-id string.
+  -- split below it goes with it. view.close() only closes the tree window
+  -- (the NvimTree buffer survives for the next toggle), so the reliable
+  -- signal is WinClosed for a window showing the tree's buffer — matched by
+  -- any window id, buffer checked inside.
   vim.api.nvim_create_autocmd('WinClosed', {
     pattern = '*',
     callback = function(ev)
@@ -742,8 +677,7 @@ function M.setup()
       if not winid then return end
       local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
       if not ok or not buf or vim.bo[buf].filetype ~= 'NvimTree' then return end
-      if not active() then return end
-      M.close()
+      if active() then M.close() end
     end,
   })
 end
