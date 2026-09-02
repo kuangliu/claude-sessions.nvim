@@ -15,8 +15,9 @@
 -- Keymaps:
 --   <C-a>  create a new session and open it on the right
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
---   <C-e>  focus the diff panel and select a changed file — restarts at the
---          first file from any other window, advances on the panel itself
+--   <C-e>  focus the diff panel and step to the next changed file — the
+--          first press starts the sweep, later presses advance from the
+--          selection and wrap past the last file (either window focused)
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}

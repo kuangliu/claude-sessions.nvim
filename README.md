@@ -32,7 +32,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | ------ | ------------- | ------------------------------------------------------------------- |
 | `<C-a>` | `n`, `t`     | Create a new Claude Code session and open it on the right           |
 | `<C-s>` | `n`, `t`     | No session displayed → show the last closed one; else switch to the next session |
-| `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (focuses the panel, wraps back to the first) |
+| `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
 
 ## Session panel
@@ -66,17 +66,21 @@ While a session window is displayed and the workspace has uncommitted changes,
 a diff panel is split above the session panel (below nvim-tree): one three-line
 entry per changed file — the basename, the `+`/`-` counts with a proportional
 bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
-(or `<Down>/<Up>`) move the cursor; the file under it draws the selection
-block. `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
-and selects a changed file: pressed from anywhere else the review RESTARTS at
-the first file; pressed while the panel holds focus it advances to the next
-(wrapping back past the last). Moving onto a file
+(or `<Down>/<Up>`) move the cursor; the file landed on draws the selection
+block, and the selection is **pinned** — it holds when the cursor moves out of
+the panel, so the review keeps running while you read or work elsewhere.
+`<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
+and selects a changed file: the FIRST press starts the sweep at the first
+file, and every press after advances from the selection and wraps back past
+the last — whichever window held focus. Landing on a file
 (an explicit `j/k` or a `<C-e>` — not the panel's opening) is what
 **renders its working-tree-vs-HEAD diff via
 [diffview.nvim](https://github.com/kuangliu/diffview.nvim)** — the same
 GitHub-style unified view (word-diffed, treesitter-highlighted, gitsigns-style
 gutter bars, `]]`/`[[` jump hunks, `<CR>` opens the source file, `q` closes
-the pane). The diff takes over the editor window: your file steps aside
+the pane). Moving the cursor out of the panel does not exit the diff — it
+stays until the panel closes, the workspace goes clean, or you press `q` on
+the pane itself. The diff takes over the editor window: your file steps aside
 (cursor and window options remembered) and comes back when the pane exits;
 with nothing but the sessions layout on screen the pane splits beside the
 terminal instead. Soft dependency: without diffview installed the panel still tracks

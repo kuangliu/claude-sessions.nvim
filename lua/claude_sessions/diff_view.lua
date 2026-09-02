@@ -24,14 +24,10 @@ M.buf = nil
 -- take-over found there and what restore hands back. Nil when the pane lives
 -- in its own split (no editor window was on screen to take over).
 M.replaced = nil
--- The render-in-flight flag (set/cleared by M.show): the diff panel's focus
--- passes read it and stand down — see the close pass's gate and M.show's gate
--- comment.
-M.busy = false
 -- The pane's last render target, { abspath, root }: a show() of the same pair
 -- while the pane is up skips the engine pipeline — the focus-flip arrival pass
--- re-selects the landed entry on every flip, and a restart lands file one the
--- pane may already show. Two git spawns, a working-file read and a two-sided
+-- re-selects the landed entry on every flip, and a step can land a file the
+-- pane already shows. Two git spawns, a working-file read and a two-sided
 -- treesitter parse are too heavy to run twice per keystroke.
 local last_target = nil
 
@@ -229,8 +225,7 @@ local function show_window(buf)
   if editor then
     -- The take-over: capture what the window holds, then swap the diff in.
     -- No split, no resize, no focus flip — the sidebar's thirds and the
-    -- terminal's pinned width are untouched, and the render's focus dance
-    -- (M.show's busy flag) simply has nothing to gate here.
+    -- terminal's pinned width are untouched.
     local opts = {}
     for opt in pairs(PANE_LOOK) do
       opts[opt] = vim.wo[editor][opt]
@@ -280,22 +275,19 @@ end
 function M.show(abspath, root)
   if not (engine() and abspath and root) then return end
   -- Same-target skip: the pane already shows this file's diff — a focus
-  -- arrival re-selects the landed entry on every flip, and a step/restart
-  -- lands a file the pane may already be showing. The skip leaves the pane
-  -- (and its cursor) exactly as this show would have.
+  -- arrival re-selects the landed entry on every flip, and a step lands a
+  -- file the pane may already be showing (a wrapped cycle revisits file
+  -- one). The skip leaves the pane (and its cursor) exactly as this show
+  -- would have.
   if active() and last_target and last_target.abspath == abspath
       and last_target.root == root then
     return
   end
   -- The render can flip focus twice (the split path's host move to the
-  -- terminal and hand-back; the take-over path flips none and the flag simply
-  -- gates nothing there): the diff panel's focus-flip pass sees those as
-  -- arrivals/departures — a departure spelled DURING a render would close the
-  -- pane the render is about to fill, and the flip-back's arrival would
-  -- re-render it, arriving/departing forever. One flag stands between them:
-  -- the panel's close pass reads busy and stands down (the render's own
-  -- flip-back is the settled state, not a departure).
-  M.busy = true
+  -- terminal and hand-back; the take-over path flips none). The diff panel's
+  -- focus-flip pass sees those flips as arrivals/departures, but neither half
+  -- holds a state to flip — the panel's selection is pinned, and a departure
+  -- spells no close — so the flip pair lands a repaint either way and stands.
   last_target = { abspath = abspath, root = root }
   local toplevel = root
   local rel = git.relpath(toplevel, abspath)
@@ -323,11 +315,8 @@ function M.show(abspath, root)
   show_window(buf)
 
   -- Land the cursor on the first change (the header's end runs into it), so
-  -- the pane opens on the file's edits rather than its top. The flag clears
-  -- here — the ONE pass after show_window's own focus flip-back, so the
-  -- panel's focus passes see the render's switches as behind them.
+  -- the pane opens on the file's edits rather than its top.
   vim.schedule(function()
-    M.busy = false
     if not (U.valid_win(M.win) and U.valid_buf(buf)) then return end
     local rows2 = vim.b[buf].diffview_rows
     local off2 = vim.b[buf].diffview_offset or 0
