@@ -350,19 +350,39 @@ local function focus_panel()
   end)
 end
 
---- j/k (and <Down>/<Up>): move the panel cursor. The editing keys are
---- silenced first (util's shared list) so these win; everything else keeps
---- its default. NOT silenced: <C-a> — the global mapping creates a session.
+--- j/k (and <Down>/<Up>): move the panel cursor; <CR>/l: hand the pane the
+--- cursor. The editing keys are silenced first (util's shared list) so these
+--- win; everything else keeps its default. NOT silenced: <C-a> — the global
+--- mapping creates a session.
 local function set_keymaps(buf)
   U.silence_editing_keys(buf)
-  local function map(key, d, desc)
-    vim.keymap.set('n', key, function() move_cursor(d) end,
+  local function map(key, fn, desc)
+    vim.keymap.set('n', key, fn,
       { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
   end
-  map('j', 1, 'next file')
-  map('k', -1, 'previous file')
-  map('<Down>', 1, 'next file')
-  map('<Up>', -1, 'previous file')
+  local function move(d)
+    return function() move_cursor(d) end
+  end
+  map('j', move(1), 'next file')
+  map('k', move(-1), 'previous file')
+  map('<Down>', move(1), 'next file')
+  map('<Up>', move(-1), 'previous file')
+
+  -- <CR>/l: open the file under the cursor in the pane and FOCUS the pane —
+  -- the session panel's <CR>/l spelling of "open what I'm on", aimed one layer
+  -- over: the review's file list hands off to its diff. The landing is the
+  -- explicit-selection spelling (land, raw_cursor_row — the keypress IS on the
+  -- panel, birth state included), so it re-opens a dismissed pane like a j
+  -- would; the focus move lands on the pane's own window, where its keymaps
+  -- (]]/[[, <CR>, q) take over. No diffview (no pane): just the selection.
+  local function open_pane()
+    local row = raw_cursor_row()
+    if not row then return end
+    land(row)
+    U.focus(diff_view.win)
+  end
+  map('<CR>', open_pane, 'open diff in pane')
+  map('l', open_pane, 'open diff in pane')
 end
 
 --- Fetch the current diff and repaint the panel. No-op when the panel is

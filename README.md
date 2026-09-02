@@ -69,6 +69,8 @@ bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
 (or `<Down>/<Up>`) move the cursor; the file landed on draws the selection
 block, and the selection is **pinned** — it holds when the cursor moves out of
 the panel, so the review keeps running while you read or work elsewhere.
+`<CR>`/`l` open the file under the cursor in the diff pane and move the cursor
+onto it (its `]]`/`[[`/`<CR>`/`q` take over).
 `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
 and selects a changed file: the FIRST press starts the sweep at the first
 file, and every press after advances from the selection and wraps back past
