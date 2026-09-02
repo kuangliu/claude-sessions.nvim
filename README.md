@@ -33,6 +33,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-a>` | `n`, `t`     | Create a new Claude Code session and open it on the right           |
 | `<C-s>` | `n`, `t`     | No session displayed → show the last closed one; else switch to the next session |
 | `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last) |
+| `<C-b>` | `n`, `t`     | Toggle a shell split below the displayed session (same width; shell 1/3 of the session's height, session 2/3) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
 
 ## Session panel

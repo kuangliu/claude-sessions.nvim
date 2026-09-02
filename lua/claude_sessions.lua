@@ -16,6 +16,7 @@
 --   <C-a>  create a new session and open it on the right
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
 --   <C-e>  focus the diff panel and step to the next changed file
+--   <C-b>  toggle a shell terminal below the displayed session
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}
@@ -296,6 +297,126 @@ panel.rename_session = function(i, name)
   if sessions[i] then M.rename(i, name) end
 end
 
+-- --- Shell terminal ---------------------------------------------------------
+-- <C-b>: a plain shell in a horizontal split below the displayed session's
+-- window — the same column, so the same width, the split taking 1/3 of the
+-- session's height (the session keeps 2/3). The shell outlives its window
+-- (job keeps running with the window closed), so <C-b> toggles and re-shows
+-- the SAME shell; a session switch or close re-anchors it below the new
+-- session window (or takes it away with the last one). Not a toggleterm
+-- terminal on purpose: the mutual exclusion in close_all_open_windows would
+-- close the shell on every session switch.
+
+local shell_buf = nil -- the shell's terminal buffer, nil when never opened
+local shell_win = nil -- its window, valid only while displayed
+
+--- The shell window split below `below` (a session window): 1/3 of its
+--- height, in the same column — the session keeps 2/3.
+local function open_shell_window(below)
+  local height = math.max(1, math.floor(vim.api.nvim_win_get_height(below) / 3))
+  U.focus(below)
+  vim.cmd('below ' .. height .. 'split')
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(win, shell_buf)
+  shell_win = win
+  return win
+end
+
+--- Show the shell below the displayed session. None yet spawns one — the
+--- split is opened FIRST (so the empty shell buffer is the current one) and
+--- then termopen'd: termopen runs on the CURRENT buffer, and running it while
+--- a session terminal is current would fail its unmodified-buffer check.
+local function show_shell()
+  local s = current
+  if not (s and window_open(s.term)) then
+    notify('No displayed session to split a shell below.', vim.log.levels.WARN)
+    return
+  end
+  if not U.valid_buf(shell_buf) then
+    shell_buf = vim.api.nvim_create_buf(false, true) -- scratch: hidden, no swap
+  end
+  open_shell_window(s.term.window)
+  if vim.bo[shell_buf].buftype ~= 'terminal' then
+    -- Never started (a fresh scratch buffer is 'nofile'; termopen flips it to
+    -- 'terminal') — start the shell in it.
+    vim.fn.termopen(vim.o.shell, {
+      -- The user typed `exit` (or the shell died): take its window down and
+      -- forget the buffer, so the next <C-b> spawns a fresh shell instead of
+      -- re-showing a dead one.
+      on_exit = function()
+        if shell_win and U.valid_win(shell_win) then
+          pcall(vim.api.nvim_win_close, shell_win, true)
+        end
+        shell_win = nil
+        if U.valid_buf(shell_buf) then
+          vim.api.nvim_buf_delete(shell_buf, { force = true })
+        end
+        shell_buf = nil
+      end,
+    })
+    vim.bo[shell_buf].filetype = 'claude-shell'
+  end
+  vim.api.nvim_win_set_cursor(shell_win, { vim.api.nvim_buf_line_count(shell_buf), 0 })
+  vim.cmd('startinsert')
+end
+
+--- <C-b>: toggle the shell split below the displayed session. Up and focused
+--- elsewhere → focus it; up and focused → away (the session window takes the
+--- rows back); down → split it below the session.
+function M.toggle_shell()
+  if shell_win and U.valid_win(shell_win) then
+    if vim.api.nvim_get_current_win() == shell_win then
+      local win = shell_win
+      shell_win = nil
+      pcall(vim.api.nvim_win_close, win, true)
+      local s = current
+      if s and U.valid_win(s.term.window) then focus(s.term.window) end
+    else
+      focus(shell_win)
+    end
+  else
+    show_shell()
+  end
+end
+
+--- Kill the shell outright — its job, its window, its buffer. The <C-d>
+--- spelling ON the shell split (that key otherwise closes the claude
+--- session); the session itself is untouched. The on_exit hook (see
+--- show_shell) repeats this teardown one pass later once the job actually
+--- dies — the nil'd state here makes that pass a no-op.
+local function close_shell()
+  if U.valid_buf(shell_buf) then
+    local job_id = vim.b[shell_buf].terminal_job_id
+    if type(job_id) == 'number' and job_id > 0 then pcall(vim.fn.jobstop, job_id) end
+  end
+  if shell_win and U.valid_win(shell_win) then
+    pcall(vim.api.nvim_win_close, shell_win, true)
+  end
+  shell_win = nil
+  if U.valid_buf(shell_buf) then
+    vim.api.nvim_buf_delete(shell_buf, { force = true })
+  end
+  shell_buf = nil
+  local s = current
+  if s and U.valid_win(s.term.window) then focus(s.term.window) end
+end
+
+--- The displayed session changed (show_session / close_current): re-anchor
+--- the shell split below the new session window, or take it away when no
+--- session window remains. The shell ITSELF survives — only the window moves
+--- or dies; <C-b> from the new session brings the same shell back.
+local function sync_shell()
+  if shell_win and U.valid_win(shell_win) then
+    local win = shell_win
+    shell_win = nil
+    pcall(vim.api.nvim_win_close, win, true)
+  end
+  local s = current
+  if s and window_open(s.term) and U.valid_buf(shell_buf) then
+    open_shell_window(s.term.window)
+  end
+end
+
 -- --- Display ----------------------------------------------------------------
 
 --- Close the window of every displayed toggleterm terminal except `keep`.
@@ -374,6 +495,7 @@ show_session = function(s)
   current = s
   panel.open() -- refresh rows (open/closed states flipped)
   diff.open() -- the uncommitted-changes panel above the tree
+  sync_shell() -- the shell split re-anchors below the new session window
 
   if stepping then
     -- Focus: the just-opened terminal keeps it for THIS event-loop pass. The
@@ -409,6 +531,8 @@ local function on_session_exit(record)
 end
 
 -- --- Public API -------------------------------------------------------------
+
+
 
 --- Create a NEW session and open it on the right.
 function M.create()
@@ -660,8 +784,19 @@ function M.setup(user_opts)
     { noremap = true, silent = true, desc = 'Switch Claude Code session' })
   vim.keymap.set({ 'n', 't' }, '<C-e>', function() diff.step_next() end,
     { noremap = true, silent = true, desc = 'Next changed file (diff panel)' })
-  vim.keymap.set('t', '<C-d>', function() M.close_current() end,
-    { noremap = true, silent = true, desc = 'Close Claude Code session' })
+  vim.keymap.set('t', '<C-d>', function()
+    -- ON the shell split this key closes the shell, not the claude session
+    -- (that spelling stays for the session's own terminal — the mapping's
+    -- original contract).
+    if shell_win and vim.api.nvim_get_current_win() == shell_win then
+      close_shell()
+    else
+      M.close_current()
+    end
+  end,
+    { noremap = true, silent = true, desc = 'Close Claude Code session (or the shell split)' })
+  vim.keymap.set({ 'n', 't' }, '<C-b>', function() M.toggle_shell() end,
+    { noremap = true, silent = true, desc = 'Toggle shell below the session' })
 
   -- Remember manually closed session windows (e.g. :close, <C-w>c, q) so
   -- <C-s> can bring the most recently closed session back — and drop the
