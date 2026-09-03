@@ -553,6 +553,17 @@ function M.refresh(then_)
     end
     last_files = files -- land/focus_panel's repaints replay these
     render(files)
+    -- The rewrite can SHRINK the list (a reverted file dropped its rows) and
+    -- the window cursor clamps onto the last row left — a counts or separator
+    -- line, never a NAME line — leaving it beside the entry the block drew
+    -- on. Re-anchor onto the clamped entry's name line — raw_cursor_row's
+    -- clamp IS where the selection landed, so reverting the last file rests
+    -- the cursor on the previous file. The session panel's refresh spells the
+    -- same snap-back.
+    local row = raw_cursor_row()
+    if row then
+      pcall(vim.api.nvim_win_set_cursor, M.win, { U.entry_line(row), 0 })
+    end
     if then_ then then_() end
   end
   fetch_numstat(root, function(rows)
