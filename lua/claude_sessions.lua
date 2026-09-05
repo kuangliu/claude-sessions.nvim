@@ -319,8 +319,47 @@ diff_view.reprobe = diff.reprobe
 local shell_buf = nil -- the shell's terminal buffer, nil when never opened
 local shell_win = nil -- its window, valid only while displayed
 -- Where the cursor stood when <C-b> opened the shell: { win, pos, mode }.
--- Toggling the shell closed from inside it puts the cursor (and mode) back here.
+-- Toggling the shell closed from inside it puts the cursor (and mode) back
+-- here; it dies with the shell itself (hide_shell_window / sync_shell keep
+-- the shell alive, so they keep the snapshot).
 local shell_prev = nil
+
+-- Input modes that mean "the user was typing" when <C-b> opened the shell;
+-- a t-mode mapping runs its callback from 'i', so that spelling counts too.
+local INSERTY_MODES = { i = true, t = true, R = true }
+
+--- Run `fn` with BufEnter suppressed. toggleterm's BufEnter handler schedules
+--- a startinsert on every programmatic switch INTO a terminal window, and a
+--- scheduled call fires only after the switcher's code has returned — onto
+--- whatever window is focused by then. Suppressing BufEnter across the window
+--- churn means no terminal is entered while `fn` runs, so nothing is ever
+--- queued. Restores the option even if `fn` raises (a leaked 'BufEnter'
+--- would silently kill every BufEnter autocmd, not just toggleterm's).
+local function with_no_bufenter(fn)
+  local saved_ei = vim.o.eventignore
+  vim.o.eventignore = 'BufEnter'
+  local ok, err = pcall(fn)
+  vim.o.eventignore = saved_ei
+  if not ok then error(err, 0) end
+end
+
+--- Take down the shell's WINDOW, leaving the shell itself (job and buffer)
+--- alive — <C-b> or sync_shell brings a window back. Nil `shell_win` BEFORE
+--- closing so any teardown pass the close itself triggers sees the window as
+--- already gone and no-ops. No-ops when there is no live window.
+local function hide_shell_window()
+  if not (shell_win and U.valid_win(shell_win)) then return end
+  local win = shell_win
+  shell_win = nil
+  pcall(vim.api.nvim_win_close, win, true)
+end
+
+--- Focus the displayed session's terminal window, if there is one — the
+--- fallback once a shell window is gone.
+local function focus_session()
+  local s = current
+  if s and U.valid_win(s.term.window) then focus(s.term.window) end
+end
 
 --- The shell window split below `below` (a session window): 1/3 of its
 --- height, in the same column — the session keeps 2/3.
@@ -357,14 +396,12 @@ local function show_shell()
       -- forget the buffer, so the next <C-b> spawns a fresh shell instead of
       -- re-showing a dead one.
       on_exit = function()
-        if shell_win and U.valid_win(shell_win) then
-          pcall(vim.api.nvim_win_close, shell_win, true)
-        end
-        shell_win = nil
+        hide_shell_window()
         if U.valid_buf(shell_buf) then
           vim.api.nvim_buf_delete(shell_buf, { force = true })
         end
         shell_buf = nil
+        shell_prev = nil -- the shell is dead; its snapshot describes nothing
       end,
     })
     vim.bo[shell_buf].filetype = 'claude-shell'
@@ -378,40 +415,7 @@ end
 --- split it below the session. Closing from INSIDE the shell returns the
 --- cursor (and the input mode) to where they stood when <C-b> opened it.
 function M.toggle_shell()
-  if shell_win and U.valid_win(shell_win) then
-    local win = shell_win
-    shell_win = nil
-    local was_current = vim.api.nvim_get_current_win() == win
-    if not was_current then
-      pcall(vim.api.nvim_win_close, win, true)
-    else
-      -- Closing THE cursor's window auto-moves focus to a neighbour — the
-      -- session terminal — and its BufEnter makes toggleterm's handler
-      -- SCHEDULE a startinsert that lands after this callback returns, on
-      -- whatever window ends up focused (see without_insert). eventignore
-      -- stops that autocmd from scheduling; keep it up across the whole
-      -- close-and-restore so the mode below is what actually sticks.
-      local saved_ei = vim.o.eventignore
-      vim.o.eventignore = 'BufEnter'
-      pcall(vim.api.nvim_win_close, win, true)
-      local prev = shell_prev
-      shell_prev = nil
-      if prev and U.valid_win(prev.win) then
-        focus(prev.win)
-        pcall(vim.api.nvim_win_set_cursor, prev.win, prev.pos)
-      else
-        local s = current
-        if s and U.valid_win(s.term.window) then focus(s.term.window) end
-      end
-      -- <C-b> in the shell is an insert-mode mapping, so insert mode would
-      -- otherwise ride along into the restored window. Go back to the mode
-      -- the cursor stood in when the shell was opened.
-      local reopen_insert = prev
-          and (prev.mode == 'i' or prev.mode == 't' or prev.mode == 'R')
-      pcall(vim.cmd, reopen_insert and 'startinsert' or 'stopinsert')
-      vim.o.eventignore = saved_ei
-    end
-  else
+  if not (shell_win and U.valid_win(shell_win)) then
     local cur = vim.api.nvim_get_current_win()
     shell_prev = {
       win = cur,
@@ -419,6 +423,29 @@ function M.toggle_shell()
       mode = vim.api.nvim_get_mode().mode,
     }
     show_shell()
+  elseif vim.api.nvim_get_current_win() ~= shell_win then
+    hide_shell_window() -- cursor elsewhere already — leave it where it is
+  else
+    -- Closing THE cursor's window auto-moves focus to a neighbour — the
+    -- session terminal — whose BufEnter would schedule a startinsert firing
+    -- after this callback returns, on the restored window. Keep BufEnter
+    -- suppressed across the whole close-and-restore so the mode set below
+    -- is what actually sticks.
+    local prev = shell_prev
+    shell_prev = nil
+    with_no_bufenter(function()
+      hide_shell_window()
+      if prev and U.valid_win(prev.win) then
+        focus(prev.win)
+        pcall(vim.api.nvim_win_set_cursor, prev.win, prev.pos)
+      else
+        focus_session()
+      end
+      -- <C-b> in the shell is an insert-mode mapping, so insert mode would
+      -- otherwise ride along into the restored window.
+      pcall(vim.cmd, (prev and INSERTY_MODES[prev.mode])
+        and 'startinsert' or 'stopinsert')
+    end)
   end
 end
 
@@ -432,16 +459,13 @@ local function close_shell()
     local job_id = vim.b[shell_buf].terminal_job_id
     if type(job_id) == 'number' and job_id > 0 then pcall(vim.fn.jobstop, job_id) end
   end
-  if shell_win and U.valid_win(shell_win) then
-    pcall(vim.api.nvim_win_close, shell_win, true)
-  end
-  shell_win = nil
+  hide_shell_window()
   if U.valid_buf(shell_buf) then
     vim.api.nvim_buf_delete(shell_buf, { force = true })
   end
   shell_buf = nil
-  local s = current
-  if s and U.valid_win(s.term.window) then focus(s.term.window) end
+  shell_prev = nil -- the shell is dead; its snapshot describes nothing
+  focus_session()
 end
 
 --- The displayed session changed (show_session / close_current): re-anchor
@@ -449,11 +473,7 @@ end
 --- session window remains. The shell ITSELF survives — only the window moves
 --- or dies; <C-b> from the new session brings the same shell back.
 local function sync_shell()
-  if shell_win and U.valid_win(shell_win) then
-    local win = shell_win
-    shell_win = nil
-    pcall(vim.api.nvim_win_close, win, true)
-  end
+  hide_shell_window()
   local s = current
   if s and window_open(s.term) and U.valid_buf(shell_buf) then
     open_shell_window(s.term.window)
@@ -491,25 +511,24 @@ end
 --- has taken focus back, so insert lands on the panel. eventignore can't stop
 --- an already-scheduled callback, but it CAN stop the BufEnter autocmd from
 --- scheduling one — it is honored while the autocmd fires, i.e. inside the
---- open below. The synchronous spawn-time startinsert is disarmed the same
---- way, for the brand-new-terminal path of the open. When the user opens a
---- session for real (<C-s>/<CR>/<C-a>) events flow normally and the terminal
---- starts in insert as usual.
+--- open below (with_no_bufenter). The synchronous spawn-time startinsert is
+--- disarmed the same way, for the brand-new-terminal path of the open — that
+--- one needs the start_in_insert config flipped, which is why this wrapper
+--- exists on top of with_no_bufenter rather than being it. When the user
+--- opens a session for real (<C-s>/<CR>/<C-a>) events flow normally and the
+--- terminal starts in insert as usual.
 local function without_insert(stepping, open)
   if not stepping then
     open()
     return
   end
-  local saved_ei = vim.o.eventignore
-  vim.o.eventignore = 'BufEnter'
   local ok_cfg, cfg = pcall(require, 'toggleterm.config')
   local saved_sii
   if ok_cfg then
     saved_sii = cfg.get('start_in_insert')
     cfg.set({ start_in_insert = false })
   end
-  open()
-  vim.o.eventignore = saved_ei
+  with_no_bufenter(open)
   if ok_cfg then cfg.set({ start_in_insert = saved_sii }) end
 end
 
