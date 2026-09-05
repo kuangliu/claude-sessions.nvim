@@ -318,6 +318,9 @@ diff_view.reprobe = diff.reprobe
 
 local shell_buf = nil -- the shell's terminal buffer, nil when never opened
 local shell_win = nil -- its window, valid only while displayed
+-- Where the cursor stood when <C-b> opened the shell: { win, pos, mode }.
+-- Toggling the shell closed from inside it puts the cursor (and mode) back here.
+local shell_prev = nil
 
 --- The shell window split below `below` (a session window): 1/3 of its
 --- height, in the same column — the session keeps 2/3.
@@ -370,21 +373,51 @@ local function show_shell()
   vim.cmd('startinsert')
 end
 
---- <C-b>: toggle the shell split below the displayed session. Up and focused
---- elsewhere → focus it; up and focused → away (the session window takes the
---- rows back); down → split it below the session.
+--- <C-b>: toggle the shell split below the displayed session. Up → close it,
+--- wherever the cursor is (the session window takes the rows back); down →
+--- split it below the session. Closing from INSIDE the shell returns the
+--- cursor (and the input mode) to where they stood when <C-b> opened it.
 function M.toggle_shell()
   if shell_win and U.valid_win(shell_win) then
-    if vim.api.nvim_get_current_win() == shell_win then
-      local win = shell_win
-      shell_win = nil
+    local win = shell_win
+    shell_win = nil
+    local was_current = vim.api.nvim_get_current_win() == win
+    if not was_current then
       pcall(vim.api.nvim_win_close, win, true)
-      local s = current
-      if s and U.valid_win(s.term.window) then focus(s.term.window) end
     else
-      focus(shell_win)
+      -- Closing THE cursor's window auto-moves focus to a neighbour — the
+      -- session terminal — and its BufEnter makes toggleterm's handler
+      -- SCHEDULE a startinsert that lands after this callback returns, on
+      -- whatever window ends up focused (see without_insert). eventignore
+      -- stops that autocmd from scheduling; keep it up across the whole
+      -- close-and-restore so the mode below is what actually sticks.
+      local saved_ei = vim.o.eventignore
+      vim.o.eventignore = 'BufEnter'
+      pcall(vim.api.nvim_win_close, win, true)
+      local prev = shell_prev
+      shell_prev = nil
+      if prev and U.valid_win(prev.win) then
+        focus(prev.win)
+        pcall(vim.api.nvim_win_set_cursor, prev.win, prev.pos)
+      else
+        local s = current
+        if s and U.valid_win(s.term.window) then focus(s.term.window) end
+      end
+      -- <C-b> in the shell is an insert-mode mapping, so insert mode would
+      -- otherwise ride along into the restored window. Go back to the mode
+      -- the cursor stood in when the shell was opened.
+      local reopen_insert = prev
+          and (prev.mode == 'i' or prev.mode == 't' or prev.mode == 'R')
+      pcall(vim.cmd, reopen_insert and 'startinsert' or 'stopinsert')
+      vim.o.eventignore = saved_ei
     end
   else
+    local cur = vim.api.nvim_get_current_win()
+    shell_prev = {
+      win = cur,
+      pos = vim.api.nvim_win_get_cursor(cur),
+      mode = vim.api.nvim_get_mode().mode,
+    }
     show_shell()
   end
 end
