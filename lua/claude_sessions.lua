@@ -168,9 +168,13 @@ local function poll_tick()
   if tick % FETCH_EVERY == 0 then
     refresh_busy_state()
   end
-  -- The blink phase is advanced inside statusline_indicator() (one toggle per
-  -- actual render), so we only redraw here to keep a lively blink while busy.
+  -- The blink phase advances once per tick below (never inside
+  -- statusline_indicator(), which lualine may evaluate any number of times per
+  -- redraw — once per window, plus extra refreshes on mode/cursor/terminal
+  -- churn — so a render-driven toggle blinks faster the busier the UI gets).
+  -- We only redraw here to keep a lively blink while busy.
   if any_busy then
+    blink_on = not blink_on
     if opts.auto_reload and tick % CHECK_EVERY == 0 then
       vim.cmd('checktime') -- skip buffers with uncommitted edits
     end
@@ -814,9 +818,8 @@ function M.statusline_indicator()
   if #sessions == 0 then
     return ''
   end
-  -- Advance the blink phase each redraw; lualine calls this on every refresh
-  -- and the poll timer triggers extra redraws while a session is busy.
-  blink_on = not blink_on
+  -- Pure read: the phase advances once per poll tick (see poll_tick), so the
+  -- blink keeps a steady cadence no matter how often lualine evaluates this.
   local parts = {}
   for _, s in ipairs(sessions) do
     if session_busy(s) and not blink_on then
