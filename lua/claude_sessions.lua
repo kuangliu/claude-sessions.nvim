@@ -17,6 +17,7 @@
 --   <C-s>  switch sessions (toggle / cycle / reopen last closed)
 --   <C-e>  focus the diff panel and step to the next changed file
 --   <C-b>  toggle a shell terminal below the displayed session
+--   <C-Space>  fullscreen the displayed session in a new tab (session buffer only)
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}
@@ -223,6 +224,10 @@ end
 -- bound before it capture the local, not a nil global.
 local show_session
 
+-- Defined in the Shell-terminal section below (fullscreen tabs); called from
+-- drop_record above before its definition.
+local close_fullscreen
+
 --- Push a session's display name into its terminal: toggleterm's display_name
 --- and the buffer var the statusline reads.
 local function apply_name(s, name)
@@ -245,8 +250,10 @@ local function renumber()
 end
 
 --- Drop a session record: remove it from the list, renumber the rest, and
---- forget it as current / last-closed.
+--- forget it as current / last-closed. Any fullscreen tab it owns goes first
+--- (its zoom window dies with the tab instead of straying into the layout).
 local function drop_record(record)
+  close_fullscreen(record)
   local index = find_session_index(record)
   if index then table.remove(sessions, index) end
   if current == record then current = nil end
@@ -322,6 +329,14 @@ diff_view.reprobe = diff.reprobe
 
 local shell_buf = nil -- the shell's terminal buffer, nil when never opened
 local shell_win = nil -- its window, valid only while displayed
+
+-- Fullscreen tabs: map<session record, { tab, win, home }> for session
+-- buffers shown in their own tab (opened by toggle_fullscreen below): the
+-- zoom tab, the home-tab window the tab was split from, and the home tab.
+-- The tab owns a window on the SAME terminal buffer, so window_open()
+-- (buffer identity) keeps tracking the session, and closing the tab leaves
+-- the underlying layout exactly as it was.
+local fullscreen_tabs = {}
 -- Where the cursor stood when <C-b> opened the shell: { win, pos, reopen_insert }.
 -- Toggling the shell closed from inside it puts the cursor (and mode) back
 -- here; it dies with the shell itself (hide_shell_window / sync_shell keep
@@ -371,6 +386,71 @@ end
 local function focus_session()
   local s = current
   if s and U.valid_win(s.term.window) then focus(s.term.window) end
+end
+
+--- Drop the fullscreen tab of `s`, restoring its window bookkeeping to the
+--- window the tab was split from when that window survived. No-op without a
+--- fullscreen tab (a manually closed tab already dropped its record through
+--- the TabClosed hook in setup()).
+close_fullscreen = function(s)
+  local fs = s and fullscreen_tabs[s] or nil
+  if not fs then return end
+  fullscreen_tabs[s] = nil
+  if fs.tab and vim.api.nvim_tabpage_is_valid(fs.tab) then
+    pcall(vim.api.nvim_set_current_tabpage, fs.tab)
+    vim.cmd('tabclose')
+  end
+  if fs.home and vim.api.nvim_tabpage_is_valid(fs.home) then
+    pcall(vim.api.nvim_set_current_tabpage, fs.home)
+  end
+  if s.term and not U.valid_win(s.term.window) and U.valid_win(fs.win) then
+    s.term.window = fs.win
+  end
+end
+
+--- <C-Space>: fullscreen a session's terminal buffer in a new tab (a real
+--- fullscreen — the tab holds the single window; nvim-tree, the session
+--- panel, the diff pane and the other windows all stay behind in the home
+--- tab). The new tab shows the SAME buffer, so the panel, the poll loop and
+--- the shell keep tracking the session untouched. Pressing again drops the tab
+--- and lands back on the untouched layout.
+---
+--- Buffer-local on the session buffer itself (bound at create()), so it only
+--- fires in a claude session — mapped for { 'n', 't' }: normal after a click
+--- or <C-\><C-n>, terminal in the usual typing state.
+function M.toggle_fullscreen()
+  -- The session owning this buffer: the mapping is buffer-local, so the
+  -- current buffer IS a session terminal (or a stale window — bail then).
+  local buf = vim.api.nvim_get_current_buf()
+  local s = find_session(function(rec) return rec.term and rec.term.bufnr == buf end)
+  if not s then
+    notify('No claude session in this buffer.', vim.log.levels.WARN)
+    return
+  end
+  if fullscreen_tabs[s] then
+    local typing = vim.api.nvim_get_mode().mode == 't'
+    close_fullscreen(s)
+    if U.valid_win(s.term.window) then
+      focus(s.term.window)
+      pcall(vim.cmd, typing and 'startinsert' or 'stopinsert')
+    end
+    return
+  end
+  if not window_open(s.term) then
+    notify('Session window is not displayed.', vim.log.levels.WARN)
+    return
+  end
+  local typing = vim.api.nvim_get_mode().mode == 't'
+  -- Leave the mode the mapping ran from: an insert left running here rides
+  -- into the new tab and greets it.
+  pcall(vim.cmd, 'stopinsert')
+  local home, orig = vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_win()
+  vim.cmd('tab split') -- the split window keeps showing this same buffer
+  local win = vim.api.nvim_get_current_win()
+  s.term.window = win -- the zoom window is now the session's live window
+  U.plain_terminal_window(win)
+  fullscreen_tabs[s] = { tab = vim.api.nvim_get_current_tabpage(), win = orig, home = home }
+  if typing then vim.cmd('startinsert') end
 end
 
 --- The shell window split below `below` (a session window): 1/3 of its
@@ -491,9 +571,15 @@ local function close_all_open_windows(keep)
   local closed_any = false
   for _, term in ipairs(require('toggleterm.terminal').get_all()) do
     if term ~= keep and window_open(term) then
-      term:close()
       local s = session_for_term(term)
-      if s then last_closed = s end
+      -- The zoom window is a second window on the same buffer: the
+      -- fullscreen tab takes the session with it instead of closing the
+      -- zoom window out from under it.
+      if s then
+        close_fullscreen(s)
+        last_closed = s
+      end
+      term:close()
       closed_any = true
     end
   end
@@ -617,6 +703,10 @@ function M.create()
   -- Toggleterm still tracks the buffer via vim.b.toggle_number.
   if U.valid_buf(record.term.bufnr) then
     vim.bo[record.term.bufnr].ft = 'claude'
+    -- Buffer-local: fires only in a claude session. <C-Space> is its own
+    -- keycode (unlike <C-m>, which IS <CR>), so it never collides with typing.
+    vim.keymap.set({ 'n', 't' }, '<C-Space>', function() M.toggle_fullscreen() end,
+      { buffer = record.term.bufnr, noremap = true, silent = true, desc = 'Fullscreen Claude Code session' })
   end
   renumber() -- names the new session (custom names elsewhere are kept)
   start_poll_timer()
@@ -872,6 +962,28 @@ function M.setup(user_opts)
         if s.term.window == wid then
           last_closed = s
           vim.schedule(panel_sync)
+          return
+        end
+      end
+    end,
+  })
+
+  -- A fullscreen tab closed by hand (a :tabclose on it, or its window closed
+  -- directly): the zoom window died with it, so the record dies too — and the
+  -- session falls back to the window the tab was split from. A fullscreen tab
+  -- is the only tab a session buffer can be alone in, so matching on the
+  -- closed tab id never mistakes the home tab.
+  vim.api.nvim_create_autocmd('TabClosed', {
+    callback = function(args)
+      local tab = tonumber(args.match)
+      if not tab then return end
+      for _, s in ipairs(sessions) do
+        local fs = fullscreen_tabs[s]
+        if fs and fs.tab == tab then
+          fullscreen_tabs[s] = nil
+          if s.term and U.valid_win(fs.win) then
+            s.term.window = fs.win
+          end
           return
         end
       end
