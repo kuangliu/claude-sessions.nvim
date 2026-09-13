@@ -726,7 +726,14 @@ show_session = function(s)
     return
   end
   panel.follow() -- panel cursor follows the displayed session
-  focus(s.term.window)
+  -- While zoomed the float holds focus (zoom_repoint already put it there);
+  -- focusing the split instead would leave the user staring at the old layout
+  -- with a live fullscreen float on top.
+  if zoomed() then
+    focus(zoom_win)
+  else
+    focus(s.term.window)
+  end
 end
 
 --- on_exit callback: auto-cleanup when a claude process ends.
