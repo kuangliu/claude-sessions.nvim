@@ -626,27 +626,32 @@ local function resync_zoom()
   if prev then zoom_prev = prev end
 end
 
---- Hide the zoom float WITHOUT forgetting it — park the state (buffer + cursor
---- home) and take the window down. The caller owns the contract: it must call
---- resync_zoom() (or zoom_repoint for a new session) before returning, so no
---- path leaves a parked zoom behind.
+--- Park the zoom float's WINDOW for toggleterm churn without taking the float
+--- down: swap a blank scratch buffer into the float, so open_split's
+--- find_open_windows sees no terminal window and creates the new session in
+--- the right-side column (`new`) instead of `existing`-splitting off the
+--- float. The float itself never closes — no flash, no WinClosed, no reopen.
 ---
---- Why hiding matters: the zoom float shows a toggleterm terminal buffer, so
---- toggleterm's open_split counts it as an open terminal window (`existing` =
---- `rightbelow split` off whatever holds focus). Hiding first makes the churn
---- below see the same layout as an unzoomed switch — the float reopens on top
---- once the split is in place.
----
---- Returns the parked buffer (nil when nothing was up). Hiding can ALSO
---- trigger a WinClosed for the float itself; the scheduled resync_zoom from
---- that autocmd then fires LATER and is harmless (the float is back up by
---- then, so it no-ops — or, on the close_current path, it rebuilds a float
---- the caller was about to reopen anyway).
+--- Returns the parked buffer (nil when nothing was up). Callers repoint the
+--- live float onto the new session buffer once the split is in place (see
+--- zoom_repoint) — the fullscreen viewport stays up the whole time.
+local zoom_scratch = nil -- blank buffer parked in the float during churn
+
 local function hide_zoom_for_churn()
   if not zoomed() then return nil end
-  local win = zoom_win
-  zoom_win = nil
-  pcall(vim.api.nvim_win_close, win, true)
+  if not U.valid_buf(zoom_scratch) then
+    zoom_scratch = vim.api.nvim_create_buf(false, true)
+    vim.bo[zoom_scratch].buftype = 'nofile'
+    vim.bo[zoom_scratch].bufhidden = 'hide'
+    vim.bo[zoom_scratch].swapfile = false
+  end
+  -- The float keeps focus on a buffer with no `q` map: a stray q mid-churn
+  -- is plain input on scratch, never an unzoom. zoom_buf keeps pointing at
+  -- the parked session buffer (it is NOT cleared): the float still "shows"
+  -- that session logically, so drop_dead_zoom/resync_zoom keep working if the
+  -- churn below takes the float down after all, and zoom_win stays valid so
+  -- zoom_repoint takes the no-flash win_set_buf path.
+  pcall(vim.api.nvim_win_set_buf, zoom_win, zoom_scratch)
   return zoom_buf
 end
 
@@ -745,13 +750,13 @@ show_session = function(s)
     return
   end
 
-  -- Park the zoom float before the churn: it shows a toggleterm buffer, so
-  -- leaving it up makes open_split below split off the float (`existing`)
-  -- instead of the right-side column (`new`). Repointed below once the split
-  -- is in place. NOTE: this runs BEFORE close_all_open_windows — and panel
-  -- stepping (j/k through the panel) also lands here with a live zoom parked
-  -- for a switch that may never settle. The parked state (zoom_buf ~= nil,
-  -- zoom_win == nil) survives; panel.reclaim_focus / resync_zoom restore it.
+  -- Park scratch in the zoom float before the churn (see hide_zoom_for_churn):
+  -- the float stays up the whole time, so there is no close/reopen flash —
+  -- only the fullscreen content swaps once, split → new session. NOTE: this
+  -- runs BEFORE close_all_open_windows — and panel stepping (j/k through the
+  -- panel) also lands here with scratch parked for a switch that may never
+  -- settle; zoom_repoint below restores the session buffer either way (every
+  -- path through here ends on a displayed session).
   local parked_buf = hide_zoom_for_churn()
   panel.switching = true -- hold panel_sync's both halves through the window churn
   without_insert(stepping, function()
