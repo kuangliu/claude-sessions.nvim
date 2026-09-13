@@ -542,13 +542,16 @@ drop_dead_zoom = function()
 end
 
 --- Take the zoom float down, returning the cursor to where zoom opened. No-op
---- when not zoomed.
+--- when not zoomed. Also removes the terminal-normal `q` mapping the float
+--- installed on the zoomed buffer (see zoom_buffer).
 unzoom = function()
   if not zoomed() then return end
   local win = zoom_win
   zoom_win = nil
   pcall(vim.api.nvim_win_close, win, true)
+  local buf = zoom_buf
   zoom_buf = nil
+  pcall(vim.keymap.del, 't', 'q', { buffer = buf })
   local prev = zoom_prev
   zoom_prev = nil
   if prev and U.valid_win(prev) then
@@ -562,6 +565,12 @@ end
 --- window id: on the close_current path the wipe tears the float's window
 --- down but the `zoom_win` id can still test valid (see drop_dead_zoom), so
 --- unconditionally closing it would kill the JUST-opened float.
+---
+--- `q` in terminal-normal closes the float — the same "dismiss" spelling as
+--- every other panel in this plugin (`q` closes the session panel, the diff
+--- panel, the diff pane). Buffer-local on the zoomed buffer, removed by
+--- unzoom; insert mode still passes `q` straight to the CLI. No-op without a
+--- live float so a stray press can never touch the split underneath.
 local function zoom_buffer(buf)
   if not U.valid_buf(buf) then return end
   local prev = vim.api.nvim_get_current_win()
@@ -577,6 +586,9 @@ local function zoom_buffer(buf)
   zoom_prev = prev
   zoom_buf = buf
   zoom_win = vim.api.nvim_open_win(buf, true, zoom_config())
+  vim.keymap.set('t', 'q', function()
+    if zoomed() then unzoom() end
+  end, { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: unzoom' })
   vim.cmd('startinsert')
 end
 
