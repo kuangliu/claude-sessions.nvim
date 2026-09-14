@@ -127,11 +127,12 @@ function U.pad_to(s, width)
   return pad > 0 and s .. string.rep(' ', pad) or s
 end
 
---- A hidden scratch buffer a panel renders into.
+--- A hidden scratch buffer a panel renders into. `filetype` optional: a
+--- scratch with no filetype of its own (e.g. the zoom-park buffer).
 function U.scratch_buffer(filetype)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = 'nofile'
-  vim.bo[buf].filetype = filetype
+  if filetype then vim.bo[buf].filetype = filetype end
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].buflisted = false
   vim.bo[buf].swapfile = false

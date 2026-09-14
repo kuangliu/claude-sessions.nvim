@@ -650,10 +650,7 @@ local zoom_scratch = nil -- blank buffer parked in the float during churn
 local function hide_zoom_for_churn()
   if not zoomed() then return nil end
   if not U.valid_buf(zoom_scratch) then
-    zoom_scratch = vim.api.nvim_create_buf(false, true)
-    vim.bo[zoom_scratch].buftype = 'nofile'
-    vim.bo[zoom_scratch].bufhidden = 'hide'
-    vim.bo[zoom_scratch].swapfile = false
+    zoom_scratch = U.scratch_buffer()
   end
   -- The float keeps focus on a buffer with no `q` map: a stray q mid-churn
   -- is plain input on scratch, never an unzoom. zoom_buf keeps pointing at

@@ -116,12 +116,7 @@ local function change_row(r)
 end
 
 local function create_buf()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype = 'nofile'
-  vim.bo[buf].filetype = 'diffview'
-  vim.bo[buf].bufhidden = 'hide'
-  vim.bo[buf].buflisted = false
-  vim.bo[buf].swapfile = false
+  local buf = U.scratch_buffer('diffview')
   pcall(vim.api.nvim_buf_set_name, buf, 'claude-sessions://' .. buf)
   vim.keymap.set('n', 'q', function() M.close() end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: close diff pane' })
