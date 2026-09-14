@@ -614,8 +614,20 @@ end
 --- Rebuild a zoom float whose buffer is still alive after display churn took
 --- the float's window down (diff pane moves; a WinClosed on the float
 --- itself). Dead buffer → the float is gone for real; just drop the state.
+--- A float still up after churn may be parked on the scratch buffer: a SHELL
+--- zoom across a session switch lands here (the session branches repoint
+--- through zoom_repoint; the shell branch had nothing) — swap the real
+--- buffer back in before returning, or the fullscreen float is left showing
+--- a blank buffer that eats every keystroke: the "stuck" front screen.
 local function resync_zoom()
-  if zoomed() then return end
+  if zoomed() then
+    if U.valid_buf(zoom_buf) and vim.api.nvim_win_get_buf(zoom_win) ~= zoom_buf then
+      vim.api.nvim_win_set_buf(zoom_win, zoom_buf)
+      vim.api.nvim_set_current_win(zoom_win)
+      vim.cmd('startinsert')
+    end
+    return
+  end
   if zoom_win == nil and zoom_buf == nil then return end
   if drop_dead_zoom() then return end
   local buf = zoom_buf
