@@ -566,6 +566,9 @@ end
 --- down but the `zoom_win` id can still test valid (see drop_dead_zoom), so
 --- unconditionally closing it would kill the JUST-opened float.
 ---
+--- `keep_home` preserves the existing cursor home (zoom_prev) instead of
+--- resetting it to the current window — the spelling a churn rebuild uses.
+---
 --- `q` in terminal-normal closes the float — the same "dismiss" spelling as
 --- every other panel in this plugin (`q` closes the session panel, the diff
 --- panel, the diff pane). A `t`-mode map would be wrong here: after `<Esc>`
@@ -574,7 +577,7 @@ end
 --- Buffer-local on the zoomed buffer, removed by unzoom; insert mode still
 --- passes `q` straight to the CLI. No-op without a live float so a stray
 --- press can never touch the split underneath.
-local function zoom_buffer(buf)
+local function zoom_buffer(buf, keep_home)
   if not U.valid_buf(buf) then return end
   local prev = vim.api.nvim_get_current_win()
   if zoomed() then
@@ -584,10 +587,8 @@ local function zoom_buffer(buf)
   else
     zoom_win = nil
   end
-  zoom_buf = nil
-  zoom_prev = nil
-  zoom_prev = prev
   zoom_buf = buf
+  if not keep_home then zoom_prev = prev end
   zoom_win = vim.api.nvim_open_win(buf, true, zoom_config())
   vim.keymap.set('n', 'q', function()
     if zoomed() then unzoom() end
@@ -628,12 +629,7 @@ local function resync_zoom()
   end
   if zoom_win == nil and zoom_buf == nil then return end
   if drop_dead_zoom() then return end
-  local buf = zoom_buf
-  local prev = zoom_prev
-  zoom_buf = nil
-  zoom_prev = nil
-  zoom_buffer(buf)
-  if prev then zoom_prev = prev end
+  zoom_buffer(zoom_buf, true)
 end
 
 --- Park the zoom float's WINDOW for toggleterm churn without taking the float
@@ -950,11 +946,8 @@ function M.close_current(target, close_opts)
     panel.open()
     diff.refresh()
     if keep_zoom then
-      -- Reopen on the successor from the parked cursor home. zoom_buffer
-      -- resets the cursor home to the current window, so save/restore it.
-      local prev = zoom_prev
-      zoom_buffer(next_session.term.bufnr)
-      if prev then zoom_prev = prev end
+      -- Reopen on the successor from the kept cursor home.
+      zoom_buffer(next_session.term.bufnr, true)
     elseif zoom_buf ~= shell_buf and zoom_buf and U.valid_buf(zoom_buf) then
       -- A live zoom on some OTHER buffer (shell zoom, or a parked state from
       -- churn elsewhere): rebuild it — close_all_open_windows above may have
