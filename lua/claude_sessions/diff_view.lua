@@ -471,17 +471,13 @@ end
 -- d/u revert (and undo the revert of) the cursor line, D reverts the whole
 -- file, c commits.
 local function set_keymaps(buf)
-  local function map(key, fn, desc)
-    vim.keymap.set('n', key, fn,
-      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
-  end
-  map(']]', function() jump_hunk(1) end, 'next change')
-  map('[[', function() jump_hunk(-1) end, 'prev change')
-  map('<CR>', jump_to_source, 'open source')
-  map('d', M.revert_line, 'revert line')
-  map('u', M.undo_revert, 'undo revert')
-  map('D', M.revert_file, 'revert file')
-  map('c', M.commit_changes, 'commit changes')
+  U.map_key(buf, ']]', function() jump_hunk(1) end, 'next change')
+  U.map_key(buf, '[[', function() jump_hunk(-1) end, 'prev change')
+  U.map_key(buf, '<CR>', jump_to_source, 'open source')
+  U.map_key(buf, 'd', M.revert_line, 'revert line')
+  U.map_key(buf, 'u', M.undo_revert, 'undo revert')
+  U.map_key(buf, 'D', M.revert_file, 'revert file')
+  U.map_key(buf, 'c', M.commit_changes, 'commit changes')
 end
 
 --- The editor window the pane takes over: a real (non-floating) window whose

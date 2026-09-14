@@ -467,27 +467,23 @@ end
 -- a session, and that must work with the cursor on the panel too.
 local function set_keymaps(buf)
   U.silence_editing_keys(buf)
-  local function map(key, fn, desc)
-    vim.keymap.set('n', key, fn,
-      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
-  end
   -- Insert mode (in-place rename): Enter applies the edit instead of splitting
   -- the row; Esc leaves insert and the InsertLeave hook cancels the edit.
   vim.keymap.set('i', '<CR>', function() finish_rename(true) end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: apply rename' })
   vim.keymap.set('i', '<Esc>', function() finish_rename(false) end,
     { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: cancel rename' })
-  map('q', function() M.close() end, 'close panel')
-  map('<CR>', open_current, 'open session')
-  map('l', open_current, 'open session')
-  map('o', open_current, 'open session')
-  map('<C-d>', close_current_row, 'close session')
-  map('r', rename_current_row, 'rename session')
+  U.map_key(buf, 'q', function() M.close() end, 'close panel')
+  U.map_key(buf, '<CR>', open_current, 'open session')
+  U.map_key(buf, 'l', open_current, 'open session')
+  U.map_key(buf, 'o', open_current, 'open session')
+  U.map_key(buf, '<C-d>', close_current_row, 'close session')
+  U.map_key(buf, 'r', rename_current_row, 'rename session')
   -- moving through the list switches sessions as it goes (debounced while held)
-  map('<Down>', function() step(1) end, 'next session')
-  map('j', function() step(1) end, 'next session')
-  map('<Up>', function() step(-1) end, 'previous session')
-  map('k', function() step(-1) end, 'previous session')
+  U.map_key(buf, '<Down>', function() step(1) end, 'next session')
+  U.map_key(buf, 'j', function() step(1) end, 'next session')
+  U.map_key(buf, '<Up>', function() step(-1) end, 'previous session')
+  U.map_key(buf, 'k', function() step(-1) end, 'previous session')
 end
 
 -- (Re)open the panel below the nvim-tree window and fill in the rows. No-op

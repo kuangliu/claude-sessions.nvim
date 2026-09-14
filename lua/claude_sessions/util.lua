@@ -262,4 +262,10 @@ function U.silence_editing_keys(buf)
   end
 end
 
+--- Set one read-only-panel keymap: buffer-local, nowait, silent, plugin-desc'd.
+function U.map_key(buf, key, fn, desc)
+  vim.keymap.set('n', key, fn,
+    { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
+end
+
 return U

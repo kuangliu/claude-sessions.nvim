@@ -495,17 +495,13 @@ end
 --- session.
 local function set_keymaps(buf)
   U.silence_editing_keys(buf)
-  local function map(key, fn, desc)
-    vim.keymap.set('n', key, fn,
-      { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: ' .. desc })
-  end
   local function move(d)
     return function() move_cursor(d) end
   end
-  map('j', move(1), 'next file')
-  map('k', move(-1), 'previous file')
-  map('<Down>', move(1), 'next file')
-  map('<Up>', move(-1), 'previous file')
+  U.map_key(buf, 'j', move(1), 'next file')
+  U.map_key(buf, 'k', move(-1), 'previous file')
+  U.map_key(buf, '<Down>', move(1), 'next file')
+  U.map_key(buf, '<Up>', move(-1), 'previous file')
 
   -- <CR>/l: open the file under the cursor in the pane and FOCUS the pane —
   -- the session panel's <CR>/l spelling of "open what I'm on", aimed one layer
@@ -520,9 +516,9 @@ local function set_keymaps(buf)
     land(row)
     U.focus(diff_view.win)
   end
-  map('<CR>', open_pane, 'open diff in pane')
-  map('l', open_pane, 'open diff in pane')
-  map('<C-d>', discard_current, 'discard file changes')
+  U.map_key(buf, '<CR>', open_pane, 'open diff in pane')
+  U.map_key(buf, 'l', open_pane, 'open diff in pane')
+  U.map_key(buf, '<C-d>', discard_current, 'discard file changes')
 end
 
 --- Fetch the current diff and repaint the panel. No-op when the panel is
