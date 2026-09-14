@@ -1,22 +1,19 @@
--- Primitives shared by the two sidebar panels (panel.lua, diff.lua): window
--- lookups, the scratch buffers they render into, their plain window look, the
--- row rewrite both renders end with, and the row↔entry mapping of the shared
--- three-line row shape. Inert helpers — no state, no lifecycle; the panels own
--- theirs.
+-- Primitives shared by the panels: window lookups, scratch buffers, the
+-- plain window look, the row rewrite both renders end with, and the row↔entry
+-- mapping of the shared three-line row shape. Inert helpers — no state, no
+-- lifecycle; the panels own theirs.
 
 local U = {}
 
---- Is this window id a real, live window?
 function U.valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
 
---- Is this buffer id a real, live buffer?
 function U.valid_buf(buf)
   return buf ~= nil and vim.api.nvim_buf_is_valid(buf)
 end
 
---- Focus a window, if it is still there; `fallback` when it is not. Returns
+--- Focus a window if it is still there; `fallback` when it is not. Returns
 --- whether focus landed on `win`.
 function U.focus(win, fallback)
   if U.valid_win(win) and pcall(vim.api.nvim_set_current_win, win) then
@@ -40,9 +37,8 @@ function U.real_windows()
   return wins
 end
 
---- The window currently showing a buffer of filetype `ft`, or nil. Current
---- tabpage only: nvim_list_wins crosses tabs, and a sibling panel's window on
---- another tab must never be mistaken for this tab's.
+--- The window showing a buffer of filetype `ft`, or nil. Current tabpage
+--- only — a sibling panel's window on another tab must never count here.
 function U.window_with_filetype(ft)
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local ok, b = pcall(vim.api.nvim_win_get_buf, w)
@@ -50,29 +46,25 @@ function U.window_with_filetype(ft)
   end
 end
 
---- Pin `opts` ({ name = value, ... }) as window-local options on `win`.
+--- The window showing nvim-tree's buffer, or nil (both panels anchor below it).
+function U.tree_window()
+  return U.window_with_filetype('NvimTree')
+end
+
 function U.apply_winopts(win, opts)
   for opt, val in pairs(opts) do
     vim.wo[win][opt] = val
   end
 end
 
---- The window currently showing nvim-tree's buffer, or nil. Both panels split
---- from it (they anchor below it).
-function U.tree_window()
-  return U.window_with_filetype('NvimTree')
-end
-
---- The plugin's notify convention: `msg` under the 'claude sessions' title,
---- at `level` (INFO when none).
+--- `msg` under the 'claude sessions' title, at `level` (INFO when none).
 function U.notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
 end
 
---- Run `args` on a job and hand its stdout (joined, one row per output line)
---- to `cb` when it exits 0, else nil. Non-blocking; the callback lands
---- scheduled. A failed spawn (the command gone from PATH) lands nil too —
---- callers gate on the value, never on an error.
+--- Run `args` on a job and hand its stdout (joined) to `cb` when it exits 0,
+--- else nil. Non-blocking; the callback lands scheduled. Callers gate on the
+--- value, never on an error.
 function U.job(args, cb)
   local stdout = {}
   local ok, job_id = pcall(vim.fn.jobstart, args, {
@@ -90,38 +82,32 @@ function U.job(args, cb)
   end
 end
 
--- Both panels render THREE buffer lines per entry — a name/symbol row, a
--- detail row, a blank separator — so their row↔entry mapping is shared here.
+-- Both panels render THREE buffer lines per entry — a name row, a detail
+-- row, a blank separator — so the row↔entry mapping is shared here.
 
---- First buffer line (1-based) of entry `i` — the name/symbol row.
-function U.entry_line(i)
+function U.entry_line(i) -- first (1-based) buffer line of entry `i`
   return 3 * i - 2
 end
 
---- Entry index for buffer line `line` (either row of an entry, or the
---- separator below it).
-function U.line_entry(line)
+function U.line_entry(line) -- entry index for buffer line `line`
   return math.floor((line + 2) / 3)
 end
 
---- How many entries a buffer of `lines` lines holds — the mapping's inverse.
-function U.entry_count(lines)
+function U.entry_count(lines) -- entries held by a buffer of `lines` lines
   return math.floor(lines / 3)
 end
 
---- Right-pad `s` with spaces to `width` display columns (a no-op past width).
---- Full-width rows are how a selected entry's block background spans its
---- panel: a plain row mark stops at the row's own end, so the row itself is
---- padded rather than extended with hl_eol (whose semantics proved
---- unreliable across nvim builds). strcharlen, not #: every rune the panels
---- draw (ᐅ/✓/⠋/▪) is single-width but multi-byte.
+--- Right-pad `s` to `width` display columns. Full-width rows are how a
+--- selected entry's block background spans its panel (hl_eol proved
+--- unreliable across builds). strcharlen, not #: every rune the panels draw
+--- (ᐅ/✓/⠋/▪) is single-width but multi-byte.
 function U.pad_to(s, width)
   local pad = math.max(width - vim.fn.strcharlen(s), 0)
   return pad > 0 and s .. string.rep(' ', pad) or s
 end
 
---- A hidden scratch buffer a panel renders into. `filetype` optional: a
---- scratch with no filetype of its own (e.g. the zoom-park buffer).
+--- A hidden scratch buffer to render into. `filetype` optional (a scratch
+--- with no filetype of its own, e.g. the zoom-park buffer).
 function U.scratch_buffer(filetype)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = 'nofile'
@@ -129,15 +115,12 @@ function U.scratch_buffer(filetype)
   vim.bo[buf].bufhidden = 'hide'
   vim.bo[buf].buflisted = false
   vim.bo[buf].swapfile = false
-  -- No completion popups on the panel text (blink.cmp reads this var; the
-  -- session panel's rename edits are where it bites).
-  vim.b[buf].completion = false
+  vim.b[buf].completion = false -- no completion popups on panel text
   return buf
 end
 
 -- Plain-text window look. The panels split below the tree and inherit its
--- window options; they are plain text — nothing decorates their edges (a
--- fold/sign column would draw grey blocks beside the rows).
+-- options; they are plain text — nothing decorates their edges.
 local PLAIN_TEXT = {
   number = false,
   relativenumber = false,
@@ -149,9 +132,9 @@ local PLAIN_TEXT = {
   cursorline = false, -- the selected entry is highlighted by render() instead
 }
 
---- The plain-text look, with `overrides` merged over (a fresh table either
---- way) — the table a module spells its whole look from: apply it, and
---- capture/restore its keys around anything that rewrites the look.
+--- The plain look with `overrides` merged over (a fresh table) — spell a
+--- module's whole look from it, and capture/restore its keys around anything
+--- that rewrites the look.
 function U.plain_look(overrides)
   return vim.tbl_extend('force', PLAIN_TEXT, overrides or {})
 end
@@ -161,33 +144,24 @@ function U.plain_text_window(win)
   U.apply_winopts(win, PLAIN_TEXT)
 end
 
--- Terminals draw their own cursor; the global cursorline/cursorcolumn only
--- paint BEHIND it — a full-width row plus a full-height column — and a
--- terminal screen never repaints the cells those stop highlighting when focus
--- moves on, so every window switch leaves the cross (or the T a CLI's next
--- frame cleared half of) baked into the terminal. The panels' plain look
--- already drops both; terminal windows need the same two dropped — directly
--- at the open sites of the windows this plugin owns, and via the BufWinEnter
--- hook in setup() wherever a terminal buffer lands in any other window.
+-- Terminals draw their own cursor; cursorline/cursorcolumn only paint BEHIND
+-- it, and a terminal screen never repaints those cells when focus moves on —
+-- the cross stays baked in. Never let the two draw in a terminal window.
 local TERMINAL_PLAIN = { cursorline = false, cursorcolumn = false }
 
---- Strip cursorline/cursorcolumn from a window showing a terminal buffer
---- (see TERMINAL_PLAIN for why they must never draw there).
+--- Strip cursorline/cursorcolumn from a window showing a terminal buffer.
 function U.plain_terminal_window(win)
   U.apply_winopts(win, TERMINAL_PLAIN)
 end
 
---- Calibrate the sidebar stack (the tree + the panels split below it) to
---- thirds: every window but the first takes floor(rows / 3); the first (the
---- tree) takes the remainder — the stack's largest share, never crushed. The
---- rows are read from the stack itself: rows derived from o.lines can
---- disagree with it whenever cmdline/frame churn shifted them. A
---- win_set_height redistributes within the stack (the nearest neighbour pays
---- first), so the assertion is ITERATED until exact, then the windows are
---- repinned. NO restack — wincmd J moves the current window to the bottom of
---- the full-width FRAME, not its own column, so in a real session it pulls
---- the sidebar windows across full width and wrecks the layout. Windows that
---- are not up (a panel still to open) are skipped — their own open()
+--- Calibrate the sidebar stack (tree + panels below it) to thirds: every
+--- window but the first takes floor(rows/3); the tree takes the remainder.
+--- Rows are read from the stack itself (o.lines can disagree with it after
+--- cmdline/frame churn). win_set_height redistributes within the stack
+--- (nearest neighbour pays first), so the assertion is ITERATED until exact,
+--- then the windows are repinned. NO restack — wincmd J moves the current
+--- window to the bottom of the full-width FRAME, not its own column, which
+--- wrecks the layout. Windows not up are skipped; their own open()
 --- calibrates the full stack.
 function U.calibrate_sidebar(...)
   local up = {}
@@ -195,7 +169,6 @@ function U.calibrate_sidebar(...)
     if U.valid_win(w) then up[#up + 1] = w end
   end
   if #up == 0 then return end
-  -- Unpin: the heights are asserted below, and a pinned window can't hold.
   for _, w in ipairs(up) do
     vim.wo[w].winfixheight = false
   end
@@ -209,9 +182,7 @@ function U.calibrate_sidebar(...)
   for i, w in ipairs(up) do
     targets[w] = (i == 1) and (rows - panels * third) or third
   end
-  -- Capped so a stack that won't converge (a window clamped at min 1) still
-  -- repins.
-  for _ = 1, 8 do
+  for _ = 1, 8 do -- capped so a stack that can't converge still repins
     local exact = true
     for _, w in ipairs(up) do
       if vim.api.nvim_win_get_height(w) ~= targets[w] then
@@ -227,9 +198,8 @@ function U.calibrate_sidebar(...)
 end
 
 --- Replace a panel buffer's rows and repaint its extmarks: `marks` is a list
---- of { lnum = row, col = byte offset, end_col = byte offset, hl = group }.
---- The whole rewrite runs modifiable so a nomodifiable panel can take fresh
---- rows; the marks replay after set_lines (the rows don't exist before).
+--- of { lnum, col, end_col, hl } (cols are byte offsets). Runs modifiable so
+--- a nomodifiable panel can take fresh rows; marks replay after set_lines.
 function U.set_rows(buf, ns, lines, marks)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   vim.bo[buf].modifiable = true
@@ -243,10 +213,8 @@ function U.set_rows(buf, ns, lines, marks)
 end
 
 -- Editing keys have no business on a read-only panel buffer, and on a
--- nomodifiable one nvim refuses them with a noisy E21. Silence the common
--- ones FIRST so a panel's functional maps win; everything else keeps its
--- default. NOT silenced: <C-a> — the global mapping creates a session, and
--- that must work with the cursor on a panel too.
+-- nomodifiable one nvim refuses them with a noisy E21. NOT silenced:
+-- <C-a> — the global mapping creates a session and must work on a panel.
 local SILENCED_KEYS = { 'a', 'A', 'i', 'I', 'O', 'c', 'C', 's', 'S', 'd', 'x', 'p', 'u' }
 
 --- Silence the editing keys on a read-only panel buffer (see SILENCED_KEYS).
