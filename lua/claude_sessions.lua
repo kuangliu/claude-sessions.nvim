@@ -32,10 +32,9 @@ local focus = U.focus
 local notify = U.notify
 
 -- --- Options --------------------------------------------------------------
--- Defaults, merged over by setup(). `auto_reload` reloads file buffers that a
--- running session's claude process changed on disk. Reloads are safe:
--- `checktime` skips buffers with uncommitted edits, so in-progress work is
--- never clobbered.
+-- Defaults, merged over by setup(). `auto_reload` reloads file buffers a
+-- session's claude process changed on disk (checktime skips buffers with
+-- uncommitted edits, so in-progress work is never clobbered).
 local opts = { auto_reload = true }
 local setup_done = false
 
@@ -48,11 +47,10 @@ local current = nil
 local last_closed = nil
 
 -- --- Poll loop ---------------------------------------------------------------
--- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS and drives two
--- cheap jobs: fetching each agent's busy state (`claude agents --json`) and,
--- while anything is busy, blinking the statusline dots and auto-reloading
--- buffers the agent changed on disk. Everything is gated on `any_busy` (or on
--- busy<->idle transitions), so an idle editor pays nothing, and the timer
+-- While sessions exist, a uv timer ticks every POLL_INTERVAL_MS: fetching
+-- agents' busy state (`claude agents --json`) on a slow sub-cycle and, while
+-- anything is busy, blinking the statusline dots and auto-reloading changed
+-- buffers. Gated on `any_busy`, so an idle editor pays nothing; the timer
 -- stops entirely once the last session closes.
 local busy_by_pid = {} -- map<pid, status string ('busy'/'idle'/...)>
 local any_busy = false -- is any live session's agent busy right now?
@@ -65,7 +63,7 @@ local POLL_INTERVAL_MS = 300 -- blink cadence + poll tick
 local FETCH_EVERY = 7 -- fetch `claude agents` every N ticks (=> ~2.1s)
 local CHECK_EVERY = 3 -- reload externally-changed buffers every N ticks (=> ~0.9s)
 
---- OS pid of a session's claude process, or nil if it can't be determined.
+--- OS pid of a session's claude process, or nil.
 local function session_pid(s)
   local job_id = s.term and s.term.job_id
   if not job_id then return nil end
@@ -73,9 +71,8 @@ local function session_pid(s)
   return ok and pid and pid > 0 and pid or nil
 end
 
---- This session's agent state as reported by `claude agents --json` —
---- 'busy', 'idle', or anything else the CLI grows (e.g. a blocked state);
---- nil when the pid is unknown or not yet in the cache.
+--- This session's agent state ('busy'/'idle'/...) from `claude agents
+--- --json`; nil when the pid is unknown or not yet in the cache.
 local function session_state(s)
   local pid = session_pid(s)
   return pid and busy_by_pid[pid] or nil
@@ -85,10 +82,8 @@ local function session_busy(s)
   return session_state(s) == 'busy'
 end
 
---- Recompute `any_busy` from the fresh pid cache. On a busy<->idle transition
---- the statusline needs one redraw to start/stop blinking; when the agent just
---- went quiet, one extra `checktime` picks up writes from its final working
---- ticks.
+--- Recompute `any_busy`. On a busy<->idle transition: one statusline redraw
+--- to start/stop blinking, plus a checktime when the agent just went quiet.
 local function update_busy()
   local was_busy = any_busy
   any_busy = false
@@ -107,12 +102,7 @@ local function update_busy()
 end
 
 --- Async-fetch `claude agents --json` and refresh the pid -> status cache.
---- Non-blocking; a failed spawn (`claude` not on PATH) keeps the last known
---- busy state and retries on the next tick.
----
---- Sessions spawned inside an nvim that itself runs under Claude would inherit
---- CLAUDE_CODE_CHILD_SESSION and stay hidden from `claude agents`, so create()
---- strips that marker to make each session an independent, trackable agent.
+--- A failed spawn keeps the last known busy state and retries next tick.
 local function refresh_busy_state()
   if fetch_inflight then return end
   fetch_inflight = true
@@ -132,8 +122,7 @@ local function refresh_busy_state()
   end)
 end
 
---- Stop the poll timer; reset the cycle counter and busy state so a later
---- start begins clean.
+--- Stop the poll timer; reset the tick counter and busy state.
 local function stop_poll_timer()
   if poll_timer then
     poll_timer:stop()
@@ -144,8 +133,8 @@ local function stop_poll_timer()
   any_busy = false
 end
 
---- One timer tick: fetch agent state on a slow sub-cycle, and keep the blink
---- (plus auto-reload) alive while something is actually busy.
+--- One timer tick: the mode guard's periodic check, the diff panel's
+--- repaint, the busy fetch, and (while busy) the blink + auto-reload.
 local function poll_tick()
   tick = tick + 1
   if #sessions == 0 then
@@ -154,12 +143,9 @@ local function poll_tick()
   end
   -- Panel mode guard's periodic check (see panel.install_mode_guard).
   vim.cmd('doautocmd User ClaudeSessionsTick')
-  -- An agent actively working is the usual reason the working tree changes,
-  -- so the diff panel tracks it: up → repaint per tick WHILE the agent works
-  -- (an idle editor's tree is static, so refreshing it 3x/sec bought nothing),
-  -- slow-cycle otherwise; down → probe+open on the slow sub-cycle, so a panel
-  -- that was never drawn (a clean workspace at open time) still appears when
-  -- the first change lands.
+  -- The diff panel repaints per tick WHILE an agent works (an idle tree is
+  -- static), slow-cycle otherwise; down → probe+open on the slow sub-cycle,
+  -- so a never-drawn panel still appears when the first change lands.
   if M.is_visible() then
     if diff.active() then
       if any_busy or tick % FETCH_EVERY == 0 then diff.refresh() end
@@ -170,11 +156,10 @@ local function poll_tick()
   if tick % FETCH_EVERY == 0 then
     refresh_busy_state()
   end
-  -- The blink phase advances once per tick below (never inside
-  -- statusline_indicator(), which lualine may evaluate any number of times per
-  -- redraw — once per window, plus extra refreshes on mode/cursor/terminal
-  -- churn — so a render-driven toggle blinks faster the busier the UI gets).
-  -- We only redraw here to keep a lively blink while busy.
+  -- The blink phase advances once per tick here, never inside
+  -- statusline_indicator() (lualine may evaluate it any number of times per
+  -- redraw — a render-driven toggle would blink faster the busier the UI
+  -- gets).
   if any_busy then
     blink_on = not blink_on
     if opts.auto_reload and tick % CHECK_EVERY == 0 then
@@ -221,12 +206,11 @@ local function find_session_index(record)
   return select(2, find_session(function(s) return s == record end))
 end
 
--- Defined in the Display section below; forward-declared so the panel hooks
--- bound before it capture the local, not a nil global.
+-- Forward-declared (defined in the Display section below) so the panel hooks
+-- bound above it capture the local, not a nil global.
 local show_session
 
---- Push a session's display name into its terminal: toggleterm's display_name
---- and the buffer var the statusline reads.
+--- Push a session's display name into its terminal and the statusline var.
 local function apply_name(s, name)
   s.name = name
   local term = s.term
@@ -237,17 +221,16 @@ local function apply_name(s, name)
   end
 end
 
---- Default session names. Every session is just `claude` — the panel's cursor
---- and the window layout tell them apart. Custom-named sessions (panel `r`)
---- keep their name through renumbers.
+--- Default session names: every session is just `claude` (the panel cursor
+--- and the layout tell them apart). Custom names survive renumbers.
 local function renumber()
   for _, s in ipairs(sessions) do
     if not s.custom_name then apply_name(s, 'claude') end
   end
 end
 
---- Drop a session record: remove it from the list, renumber the rest, and
---- forget it as current / last-closed.
+--- Drop a session record: remove it, renumber the rest, forget it as
+--- current / last-closed.
 local function drop_record(record)
   local index = find_session_index(record)
   if index then table.remove(sessions, index) end
@@ -260,13 +243,10 @@ end
 -- panel.lua is required at the top; its hooks are bound here, after the
 -- registry helpers they close over (avoids a require cycle).
 
---- Push the registry/window state to both panels: re-render their rows, or
---- close them when nothing is displayed anymore. The diff panel shadows the
---- session panel's visibility (its open/close decision is diff.sync's). The
---- hold for a session switch lives HERE — one guard, both halves
---- (panel.switching): the churn's close_all_open_windows → panel_sync must
---- not initiate a redundant open mid-churn (show_session's own diff.open()
---- then lands as a no-op there).
+--- Push registry/window state to both panels. The switch hold (panel
+--- .switching) lives here — one guard, both halves: the churn's
+--- close_all_open_windows → panel_sync must not open a redundant panel
+--- mid-churn (show_session's own open() then lands as a no-op).
 local function panel_sync()
   if panel.switching then return end -- mid-switch churn: show_session owns both halves
   panel.sync(M.is_visible())
@@ -293,8 +273,8 @@ panel.show = function(i)
   if s then show_session(s) end
 end
 
---- The panel's <C-d>: kill the session on that row. `M.close_current` is
---- defined below (public API), so this closure resolves it at call time.
+--- The panel's <C-d>: kill the session on that row (M.close_current is
+--- defined below; the closure resolves it at call time).
 panel.close_session = function(i)
   local s = sessions[i]
   if s then M.close_current(s, { stepping = true }) end
@@ -304,44 +284,36 @@ panel.rename_session = function(i, name)
   if sessions[i] then M.rename(i, name) end
 end
 
---- The diff pane's working-tree edits call back into the diff panel's
---- machinery: D discards through the same prompted discard as <C-d> (it
---- knows only the path, so classify_file runs first), c stages and commits
---- all on jobs, and every edit lands in the shared re-probe tail.
+--- The diff pane's edits call back into the diff panel's machinery: D
+--- discards through the same prompted discard, c commits, and every edit
+--- lands in the shared re-probe tail.
 diff_view.discard_path = diff.discard_path
 diff_view.commit = diff.commit_all
 diff_view.reprobe = diff.reprobe
 
--- Defined in the Zoom section below; forward-declared so the shell toggle
--- (which yields to an open zoom) and the shell's <C-d> spelling capture the
--- locals, not nil globals.
+-- Forward-declared (defined in the Zoom section below) so the shell toggle
+-- (which yields to an open zoom) and the shell's <C-d> capture the locals,
+-- not nil globals.
 local zoomed, unzoom, drop_dead_zoom
 
 -- --- Shell terminal ---------------------------------------------------------
--- <C-b>: a plain shell in a horizontal split below the displayed session's
--- window — the same column, so the same width, the split taking 1/3 of the
--- session's height (the session keeps 2/3). The shell outlives its window
--- (job keeps running with the window closed), so <C-b> toggles and re-shows
--- the SAME shell; a session switch or close re-anchors it below the new
--- session window (or takes it away with the last one). Not a toggleterm
--- terminal on purpose: the mutual exclusion in close_all_open_windows would
--- close the shell on every session switch.
+-- <C-b>: a plain shell in a split below the displayed session — same column,
+-- 1/3 of the session's height. The shell outlives its window, so <C-b>
+-- re-shows the SAME shell; a session switch re-anchors it below the new
+-- session window. Not a toggleterm terminal on purpose: the mutual exclusion
+-- in close_all_open_windows would close the shell on every session switch.
 
 local shell_buf = nil -- the shell's terminal buffer, nil when never opened
 local shell_win = nil -- its window, valid only while displayed
--- Where the cursor stood when <C-b> opened the shell: { win, pos, reopen_insert }.
--- Toggling the shell closed from inside it puts the cursor (and mode) back
--- here; it dies with the shell itself (hide_shell_window / sync_shell keep
--- the shell alive, so they keep the snapshot).
+-- Where the cursor stood when <C-b> opened the shell: { win, pos,
+-- reopen_insert }. Dies with the shell itself.
 local shell_prev = nil
 
---- Run `fn` with BufEnter suppressed. toggleterm's BufEnter handler schedules
---- a startinsert on every programmatic switch INTO a terminal window, and a
---- scheduled call fires only after the switcher's code has returned — onto
---- whatever window is focused by then. Suppressing BufEnter across the window
---- churn means no terminal is entered while `fn` runs, so nothing is ever
---- queued. Restores the option even if `fn` raises (a leaked 'BufEnter'
---- would silently kill every BufEnter autocmd, not just toggleterm's).
+--- Run `fn` with BufEnter suppressed: toggleterm's BufEnter handler schedules
+--- a startinsert on every programmatic switch INTO a terminal window, which
+--- would fire after the switcher's code returns — onto whatever window is
+--- focused by then. Restores the option even if `fn` raises (a leaked
+--- 'BufEnter' would silently kill every BufEnter autocmd).
 local function with_no_bufenter(fn)
   local saved_ei = vim.o.eventignore
   vim.o.eventignore = 'BufEnter'
@@ -350,10 +322,9 @@ local function with_no_bufenter(fn)
   if not ok then error(err, 0) end
 end
 
---- Take down the shell's WINDOW, leaving the shell itself (job and buffer)
---- alive — <C-b> or sync_shell brings a window back. Nil `shell_win` BEFORE
---- closing so any teardown pass the close itself triggers sees the window as
---- already gone and no-ops. No-ops when there is no live window.
+--- Take down the shell's WINDOW, leaving the shell itself alive. Nil
+--- `shell_win` BEFORE closing so teardown the close triggers sees the window
+--- as already gone and no-ops.
 local function hide_shell_window()
   if not (shell_win and U.valid_win(shell_win)) then return end
   local win = shell_win
@@ -361,9 +332,9 @@ local function hide_shell_window()
   pcall(vim.api.nvim_win_close, win, true)
 end
 
---- Forget the shell outright — its window, its buffer, its snapshot. The
---- single home for the shell's death sequence; on_exit and close_shell both
---- route through here so no teardown path can nil one piece without the rest.
+--- Forget the shell outright — window, buffer, snapshot. The single home of
+--- the shell's death sequence; on_exit and close_shell both route through
+--- here so no path can nil one piece without the rest.
 local function forget_shell()
   hide_shell_window()
   if U.valid_buf(shell_buf) then
@@ -373,15 +344,14 @@ local function forget_shell()
   shell_prev = nil -- the shell is dead; its snapshot describes nothing
 end
 
---- Focus the displayed session's terminal window, if there is one — the
---- fallback once a shell window is gone.
+--- Focus the displayed session's terminal window, if there is one.
 local function focus_session()
   local s = current
   if s and U.valid_win(s.term.window) then focus(s.term.window) end
 end
 
---- The shell window split below `below` (a session window): 1/3 of its
---- height, in the same column — the session keeps 2/3.
+--- Split the shell window below `below` (a session window): 1/3 of its
+--- height, in the same column.
 local function open_shell_window(below)
   local height = math.max(1, math.floor(vim.api.nvim_win_get_height(below) / 3))
   U.focus(below)
@@ -394,9 +364,9 @@ local function open_shell_window(below)
 end
 
 --- Show the shell below the displayed session. None yet spawns one — the
---- split is opened FIRST (so the empty shell buffer is the current one) and
---- then termopen'd: termopen runs on the CURRENT buffer, and running it while
---- a session terminal is current would fail its unmodified-buffer check.
+--- split opens FIRST (termopen runs on the CURRENT buffer, and running it
+--- while a session terminal is current would fail its unmodified-buffer
+--- check).
 local function show_shell()
   local s = current
   if not (s and window_open(s.term)) then
@@ -424,10 +394,8 @@ end
 
 --- <C-b>: toggle the shell split below the displayed session. While zoomed,
 --- the key only takes the zoom float down — the shell split underneath keeps
---- its own state, so a second press is what really toggles it. Up → close it,
---- wherever the cursor is (the session window takes the rows back); down →
---- split it below the session. Closing from INSIDE the shell returns the
---- cursor (and the input mode) to where they stood when <C-b> opened it.
+--- its own state, so a second press is what really toggles it. Closing from
+--- INSIDE the shell returns the cursor (and mode) to where <C-b> opened it.
 function M.toggle_shell()
   if zoomed() then
     unzoom()
@@ -435,9 +403,8 @@ function M.toggle_shell()
   end
   if not (shell_win and U.valid_win(shell_win)) then
     local cur = vim.api.nvim_get_current_win()
-    -- Decide "was the user typing?" here, at capture: a t-mode mapping runs
-    -- its callback from 'i', so that spelling counts too. The snapshot then
-    -- carries the answer, and restore needs no mode vocabulary of its own.
+    -- Decide "was the user typing?" at capture: a t-mode mapping runs its
+    -- callback from 'i', so that spelling counts too.
     local mode = vim.api.nvim_get_mode().mode
     shell_prev = {
       win = cur,
@@ -448,8 +415,8 @@ function M.toggle_shell()
   elseif vim.api.nvim_get_current_win() ~= shell_win then
     hide_shell_window() -- cursor elsewhere already — leave it where it is
   else
-    -- Closing THE cursor's window auto-moves focus to a neighbour (see
-    -- with_no_bufenter) — the suppression keeps the mode set below sticky.
+    -- Closing THE cursor's window auto-moves focus to a neighbour — the
+    -- BufEnter suppression keeps the mode set below sticky.
     local prev = shell_prev
     shell_prev = nil
     with_no_bufenter(function()
@@ -460,18 +427,17 @@ function M.toggle_shell()
       else
         focus_session()
       end
-      -- <C-b> in the shell is an insert-mode mapping, so insert mode would
+      -- <C-b> in the shell is an insert-mode mapping: insert mode would
       -- otherwise ride along into the restored window.
       pcall(vim.cmd, (prev and prev.reopen_insert) and 'startinsert' or 'stopinsert')
     end)
   end
 end
 
---- Kill the shell outright — its job, its window, its buffer. The <C-d>
---- spelling ON the shell split (that key otherwise closes the claude
---- session); the session itself is untouched. The on_exit hook (see
---- show_shell) repeats this teardown one pass later once the job actually
---- dies — forget_shell's nil'd state makes that pass a no-op.
+--- Kill the shell outright — the <C-d> spelling ON the shell split (that key
+--- otherwise closes the claude session). The on_exit hook repeats this
+--- teardown once the job dies — forget_shell's nil'd state makes that pass a
+--- no-op.
 local function close_shell()
   if U.valid_buf(shell_buf) then
     local job_id = vim.b[shell_buf].terminal_job_id
@@ -482,10 +448,9 @@ local function close_shell()
   focus_session()
 end
 
---- The displayed session changed (show_session / close_current): re-anchor
---- the shell split below the new session window, or take it away when no
---- session window remains. The shell ITSELF survives — only the window moves
---- or dies; <C-b> from the new session brings the same shell back.
+--- The displayed session changed: re-anchor the shell split below the new
+--- session window, or take it away when none remains. The shell itself
+--- survives — <C-b> brings the same shell back.
 local function sync_shell()
   hide_shell_window()
   local s = current
@@ -497,21 +462,18 @@ end
 -- --- Zoom -------------------------------------------------------------------
 -- <C-space>: a full-screen float showing the SAME terminal buffer as the
 -- displayed session (or the <C-b> shell when the cursor is on it) — a
--- temporary viewport, not a new window layout: the session/shell split stays
--- exactly where it is underneath, and the float dies on the second press (the
--- cursor returns to the window it came from). The same buffer shown twice on
--- screen is fine for terminals (both viewports render the same screen); a
--- normal buffer wipe (e.g. <C-d> closing a session) takes the float with it,
--- and other display churn (session switch/close of a background session, diff
--- pane open/close) rebuilds the float when the zoomed buffer is still around.
+-- temporary viewport, not a new layout: the split stays where it is
+-- underneath, and the float dies on the second press. A buffer wipe takes the
+-- float with it; other display churn rebuilds it when the zoomed buffer is
+-- still around.
 
 local zoom_win = nil -- the fullscreen float, valid only while zoomed
 local zoom_buf = nil -- the terminal buffer it shows (session or shell)
 local zoom_prev = nil -- where the cursor stood when zoom opened
 
 --- The float's config, read live so a resize between zoom and resync still
---- fits. Full-bleed: from the top-left of the editor to just above the
---- cmdline — the statusline row sits underneath the float, hidden for real.
+--- fits. Full-bleed: top-left of the editor to just above the cmdline — the
+--- statusline row hides underneath.
 local function zoom_config()
   return {
     relative = 'editor',
@@ -530,9 +492,8 @@ zoomed = function()
   return U.valid_win(zoom_win)
 end
 
---- Forget a zoom whose window is already gone AND whose buffer is dead (a
---- buffer wipe takes the float's window with it; either half dying means the
---- viewport is gone). Returns whether anything was dropped.
+--- Forget a zoom whose window is already gone AND whose buffer is dead.
+--- Returns whether anything was dropped.
 drop_dead_zoom = function()
   if zoomed() then return false end
   if zoom_win == nil and zoom_buf == nil then return false end
@@ -541,9 +502,8 @@ drop_dead_zoom = function()
   return true
 end
 
---- Take the zoom float down, returning the cursor to where zoom opened. No-op
---- when not zoomed. Also removes the terminal-normal `q` mapping the float
---- installed on the zoomed buffer (see zoom_buffer).
+--- Take the zoom float down, returning the cursor to where zoom opened.
+--- Also removes the terminal-normal `q` mapping zoom_buffer installed.
 unzoom = function()
   if not zoomed() then return end
   local win = zoom_win
@@ -570,22 +530,19 @@ local function focus_zoom_or(win)
   end
 end
 
---- Open the zoom float over `buf` (a terminal buffer). Never reuses a live
---- window id: on the close_current path the wipe tears the float's window
---- down but the `zoom_win` id can still test valid (see drop_dead_zoom), so
---- unconditionally closing it would kill the JUST-opened float.
+--- Open the zoom float over `buf`. Never reuses a live window id: on the
+--- close_current path the wipe tears the float's window down but the
+--- `zoom_win` id can still test valid, so unconditionally closing it would
+--- kill the JUST-opened float.
 ---
---- `keep_home` preserves the existing cursor home (zoom_prev) instead of
---- resetting it to the current window — the spelling a churn rebuild uses.
+--- `keep_home` preserves the existing cursor home (zoom_prev) — the spelling
+--- a churn rebuild uses.
 ---
---- `q` in terminal-normal closes the float — the same "dismiss" spelling as
---- every other panel in this plugin (`q` closes the session panel, the diff
---- panel, the diff pane). A `t`-mode map would be wrong here: after `<Esc>`
---- the terminal is in terminal-NORMAL, which uses `n`-mode maps (a `t` map
---- only fires while typing into the job — where `q` must stay plain input).
---- Buffer-local on the zoomed buffer, removed by unzoom; insert mode still
---- passes `q` straight to the CLI. No-op without a live float so a stray
---- press can never touch the split underneath.
+--- `q` in terminal-NORMAL closes the float, the same dismiss spelling as
+--- every other panel. n-mode, not t-mode: after <Esc> the terminal is in
+--- terminal-normal (n-mode maps), and while typing into the job q must stay
+--- plain input. Buffer-local, removed by unzoom; a stray press without a live
+--- float never touches the split underneath.
 local function zoom_buffer(buf, keep_home)
   if not U.valid_buf(buf) then return end
   local prev = vim.api.nvim_get_current_win()
@@ -605,10 +562,9 @@ local function zoom_buffer(buf, keep_home)
   vim.cmd('startinsert')
 end
 
---- Show `buf` (a live terminal buffer) in the zoom float: first zoom ever
---- opens it, a live float repoints onto the new buffer — a session switch
---- while zoomed jumps straight to the new session fullscreen, not back to the
---- split layout. Keeps whatever cursor home the zoom already had.
+--- Show `buf` in the zoom float: first zoom opens it, a live float repoints
+--- onto the new buffer — a session switch while zoomed jumps straight to the
+--- new session fullscreen. Keeps whatever cursor home the zoom already had.
 local function zoom_repoint(buf)
   if not U.valid_buf(buf) then return end
   if zoomed() then
@@ -621,14 +577,11 @@ local function zoom_repoint(buf)
   vim.cmd('startinsert')
 end
 
---- Rebuild a zoom float whose buffer is still alive after display churn took
---- the float's window down (diff pane moves; a WinClosed on the float
---- itself). Dead buffer → the float is gone for real; just drop the state.
---- A float still up after churn may sit parked on the scratch buffer —
---- hide_zoom_for_churn swaps it in for the churn, and only the session
---- branches repaint afterwards (zoom_repoint), so the shell zoom riding out
---- a session switch lands here: repoint onto the real buffer, or the float
---- keeps showing a blank buffer no keystroke reaches.
+--- Rebuild a zoom float whose buffer survived display churn that took the
+--- float's window down; dead buffer → drop the state. A float still up after
+--- churn may sit parked on scratch (hide_zoom_for_churn): repoint onto the
+--- real buffer — only the session branches repaint, so the shell zoom riding
+--- out a switch lands here.
 local function resync_zoom()
   if zoomed() then
     if U.valid_buf(zoom_buf) and vim.api.nvim_win_get_buf(zoom_win) ~= zoom_buf then
@@ -641,15 +594,11 @@ local function resync_zoom()
   zoom_buffer(zoom_buf, true)
 end
 
---- Park the zoom float's WINDOW for toggleterm churn without taking the float
---- down: swap a blank scratch buffer into the float, so open_split's
---- find_open_windows sees no terminal window and creates the new session in
---- the right-side column (`new`) instead of `existing`-splitting off the
---- float. The float itself never closes — no flash, no WinClosed, no reopen.
----
---- Returns the parked buffer (nil when nothing was up). Callers repoint the
---- live float onto the new session buffer once the split is in place (see
---- zoom_repoint) — the fullscreen viewport stays up the whole time.
+--- Park the zoom float's WINDOW for toggleterm churn: swap a blank scratch
+--- buffer into the float, so open_split's find_open_windows sees no terminal
+--- window and splits the new session into the right-side column instead of
+--- off the float. The float never closes — no flash, no WinClosed, no reopen.
+--- Returns the parked buffer (nil when nothing was up).
 local zoom_scratch = nil -- blank buffer parked in the float during churn
 
 local function hide_zoom_for_churn()
@@ -657,18 +606,17 @@ local function hide_zoom_for_churn()
   if not U.valid_buf(zoom_scratch) then
     zoom_scratch = U.scratch_buffer()
   end
-  -- The float keeps focus on a buffer with no `q` map: a stray q mid-churn
-  -- is plain input on scratch, never an unzoom. zoom_buf keeps pointing at
-  -- the parked session buffer (it is NOT cleared): the float still "shows"
-  -- that session logically, so drop_dead_zoom/resync_zoom keep working if the
-  -- churn below takes the float down after all, and zoom_win stays valid so
-  -- zoom_repoint takes the no-flash win_set_buf path.
+  -- The float keeps focus on scratch (no q map: a stray q is plain input,
+  -- never an unzoom). zoom_buf keeps pointing at the parked session buffer —
+  -- the float still "shows" it logically, so drop_dead_zoom/resync_zoom keep
+  -- working, and zoom_win stays valid so zoom_repoint takes the no-flash
+  -- win_set_buf path.
   pcall(vim.api.nvim_win_set_buf, zoom_win, zoom_scratch)
   return zoom_buf
 end
 
 --- <C-space>: zoom the displayed session's terminal (or the <C-b> shell when
---- the cursor is on it) into a fullscreen float; press again to come back.
+--- the cursor is on it); press again to come back.
 function M.toggle_zoom()
   if zoomed() then
     unzoom()
@@ -714,17 +662,11 @@ local function close_all_open_windows(keep)
   if closed_any then panel_sync() end
 end
 
---- Run `open` (a toggleterm terminal open) without letting toggleterm request
---- insert mode. A no-op unless `stepping`.
----
---- toggleterm's BufEnter handler schedules a startinsert on every programmatic
---- terminal switch, firing after this function returns — by which time the
---- panel has taken focus back, so insert lands on the panel. Suppressed via
---- with_no_bufenter below; the synchronous spawn-time startinsert (the
---- brand-new-terminal path) needs the start_in_insert config flipped instead,
---- which is why this wrapper exists on top of with_no_bufenter rather than
---- being it. When the user opens a session for real (<C-s>/<CR>/<C-a>) events
---- flow normally and the terminal starts in insert as usual.
+--- Run `open` without letting toggleterm request insert mode — a no-op
+--- unless `stepping`. with_no_bufenter covers the queued BufEnter startinsert;
+--- the synchronous spawn-time startinsert (brand-new-terminal path) needs the
+--- start_in_insert config flipped instead, which is why this wrapper exists
+--- on top of it. A real open (<C-s>/<CR>/<C-a>) flows normally.
 local function without_insert(stepping, open)
   if not stepping then
     open()
@@ -740,10 +682,9 @@ local function without_insert(stepping, open)
   if ok_cfg then cfg.set({ start_in_insert = saved_sii }) end
 end
 
---- Close everything else, open this session's window, and mark it current.
---- Keeps the panel in sync. Focus: the panel's fresh open (a split below the
---- tree) steals focus, so hand it back to the session window — except while
---- the panel is stepping (j/k), where the panel keeps the cursor.
+--- Close everything else, open this session's window, mark it current, keep
+--- the panels in sync. Focus lands on the session window (the panel keeps it
+--- while stepping).
 show_session = function(s)
   local stepping = panel.stepping
   -- Already displayed: opening again would split a second window over the
@@ -757,13 +698,11 @@ show_session = function(s)
     return
   end
 
-  -- Park scratch in the zoom float before the churn (see hide_zoom_for_churn):
-  -- the float stays up the whole time, so there is no close/reopen flash —
-  -- only the fullscreen content swaps once, split → new session. NOTE: this
-  -- runs BEFORE close_all_open_windows — and panel stepping (j/k through the
-  -- panel) also lands here with scratch parked for a switch that may never
-  -- settle; zoom_repoint below restores the session buffer either way (every
-  -- path through here ends on a displayed session).
+  -- Park scratch in the zoom float BEFORE the churn: the float stays up the
+  -- whole time — no close/reopen flash, only the fullscreen content swaps
+  -- once. Panel stepping also lands here with scratch parked for a switch
+  -- that may never settle; zoom_repoint below restores either way (every path
+  -- ends on a displayed session).
   local parked_buf = hide_zoom_for_churn()
   panel.switching = true -- hold panel_sync's both halves through the window churn
   without_insert(stepping, function()
@@ -778,8 +717,8 @@ show_session = function(s)
   sync_shell() -- the shell split re-anchors below the new session window
 
   -- The display moved: a session zoom follows it fullscreen (a shell zoom
-  -- stays on the shell); a float other churn took down rebuilds when its
-  -- buffer is still alive.
+  -- stays on the shell); a float churn took down rebuilds while its buffer
+  -- lives.
   if zoom_buf ~= shell_buf then
     if parked_buf or (zoom_buf and U.valid_buf(zoom_buf)) then
       zoom_repoint(s.term.bufnr)
@@ -791,27 +730,23 @@ show_session = function(s)
   end
 
   if stepping then
-    -- Focus: the just-opened terminal keeps it for THIS event-loop pass. The
-    -- panel takes focus back one scheduled pass later (panel.step re-claims),
-    -- which is guaranteed to run AFTER any startinsert closures toggleterm
-    -- queued behind the BufEnter of this very switch — those fire while the
-    -- terminal still holds focus, where they are harmless. Focusing the panel
-    -- synchronously instead would let a queued startinsert fire on the panel
-    -- and flash INSERT on the statusline.
+    -- The just-opened terminal keeps focus for THIS pass; the panel takes it
+    -- back one scheduled pass later — guaranteed AFTER any startinsert
+    -- closures toggleterm queued, which fire harmlessly on the terminal.
+    -- A synchronous panel focus would let a queued startinsert fire ON the
+    -- panel and flash INSERT.
     return
   end
   panel.follow() -- panel cursor follows the displayed session
   -- While zoomed the float holds focus (zoom_repoint already put it there);
-  -- focusing the split instead would leave the user staring at the old layout
-  -- with a live fullscreen float on top.
+  -- focusing the split would leave the user staring at the old layout with a
+  -- live fullscreen float on top.
   focus_zoom_or(s.term.window)
 end
 
---- on_exit callback: auto-cleanup when a claude process ends.
---- Sessions run with close_on_exit = false (see create) so that a killed job's
---- exit does not make toggleterm close the window / restore focus to the origin
---- window; that focus restore is what makes <C-d> steal focus ~0.5s later. We
---- tidy the window and buffer here instead.
+--- on_exit: tidy the window and buffer when a claude process ends.
+--- close_on_exit = false keeps toggleterm's own teardown (window close +
+--- focus restore — the thing that made <C-d> steal focus ~0.5s later) off.
 local function on_session_exit(record)
   local term = record.term
   if term then
@@ -837,9 +772,9 @@ function M.create()
     cmd = 'claude --allow-dangerously-skip-permissions',
     direction = 'vertical',
     display_name = '', -- set by renumber()
-    -- Empty string == unset for claude's child-session check (verified): this
-    -- clears the marker inherited from this nvim's environment so the spawned
-    -- process is treated as an independent, trackable agent.
+    -- Empty string == unset for claude's child-session check: clears the
+    -- marker inherited from this nvim's environment so the session is an
+    -- independent, trackable agent.
     env = { CLAUDE_CODE_CHILD_SESSION = '' },
     -- Keep toggleterm from closing the window / restoring focus when the job
     -- dies; on_session_exit cleans up instead.
@@ -848,19 +783,17 @@ function M.create()
   })
   table.insert(sessions, record)
   show_session(record)
-  -- Use a non-toggleterm filetype so lualine's toggleterm extension (matches
-  -- ft == 'toggleterm') does not replace the statusline inside sessions.
-  -- Toggleterm still tracks the buffer via vim.b.toggle_number.
+  -- A non-toggleterm filetype keeps lualine's toggleterm extension off the
+  -- statusline; toggleterm still tracks the buffer via vim.b.toggle_number.
   if U.valid_buf(record.term.bufnr) then
     vim.bo[record.term.bufnr].ft = 'claude'
   end
   renumber() -- names the new session (custom names elsewhere are kept)
   start_poll_timer()
   notify('New session: ' .. record.name)
-  -- When <C-a> fires from inside an existing terminal (t-mode mapping), nvim's
-  -- terminal handling overrides toggleterm's startinsert once the mapping
-  -- completes, leaving the new session in terminal normal mode. Schedule
-  -- startinsert to run after the mapping machinery settles.
+  -- <C-a> from inside a terminal (t-mode mapping): nvim overrides toggleterm's
+  -- startinsert once the mapping completes, leaving terminal-normal. Schedule
+  -- a startinsert to run after the mapping machinery settles.
   vim.schedule(function()
     if vim.api.nvim_get_current_win() == record.term.window then
       vim.cmd('startinsert')
@@ -868,12 +801,8 @@ function M.create()
   end)
 end
 
---- Close a session (window + process) and drop it. `target` picks the session;
---- default is the displayed one (or the most recently created when none is
---- displayed). The split stays occupied: the session that followed the closed
---- one (or the last remaining one, if the closed one was last) is shown in its
---- place. With `close_opts.stepping` (a panel-driven close) focus stays on the
---- panel: the successor is still swapped into the split, but silently, and
+--- Close a session (window + process) and drop it; the split stays occupied
+--- — the successor is shown in its place. `stepping` keeps focus on the panel;
 --- closing a background session leaves the display alone.
 function M.close_current(target, close_opts)
   close_opts = close_opts or {}
@@ -887,20 +816,16 @@ function M.close_current(target, close_opts)
   local index = find_session_index(target)
   -- Panel-driven close: the list keeps focus and drives the display silently.
   local stepping = close_opts.stepping or panel.stepping
-  -- Remember the window showing the target, so the split can be kept in place.
-  -- Also the zoom state BEFORE the wipe: wiping a buffer shown in two windows
-  -- closes BOTH, so the zoom float is gone afterwards and zoom_buf points at
-  -- a dead buffer — capture the intent (follow onto the successor?) now.
-  -- NOTE: read BEFORE the wipe below — wiping the target buffer also tears
-  -- down the zoom float showing it, and the comparison afterwards would never
-  -- fire (zoom_buf would be left pointing at a dead buffer).
+  -- The zoom state BEFORE the wipe (read first: wiping a buffer shown in two
+  -- windows closes BOTH, so afterwards zoom_buf points at a dead buffer and
+  -- the comparison would never fire) — capture the follow-onto-successor
+  -- intent now. `win` too: it may not survive the wipe.
   local win = window_open(term) and term.window or nil
   local keep_zoom = zoom_buf ~= nil and zoom_buf == term.bufnr
 
-  -- Wiping the terminal buffer kills the claude job; the record is dropped
-  -- below. close_on_exit = false keeps the job's later exit from closing the
-  -- window / moving focus. Deleting the LAST buffer of its window also tears
-  -- the window down, so `win` may be invalid afterwards — re-checked below.
+  -- Wiping the buffer kills the job (close_on_exit = false keeps the exit
+  -- from closing the window / moving focus). Deleting the LAST buffer of its
+  -- window tears the window down — `win` is re-checked below.
   if U.valid_buf(term.bufnr) then
     vim.api.nvim_buf_delete(term.bufnr, { force = true })
   end
@@ -908,9 +833,8 @@ function M.close_current(target, close_opts)
   notify('Closed session: ' .. target.name)
 
   if #sessions == 0 then
-    -- The wipe took the zoom float's window with it too (same buffer, two
-    -- windows); just forget the dead state — unzoom's refocus would land
-    -- nowhere with no sessions left.
+    -- The wipe took the zoom float's window with it too; just forget the
+    -- dead state — unzoom's refocus would land nowhere with no sessions.
     drop_dead_zoom()
     panel_sync() -- last session gone: drop the panel
     return
@@ -919,26 +843,18 @@ function M.close_current(target, close_opts)
   -- The closed session's zoom follows it onto the successor fullscreen
   -- (`keep_zoom` was captured before the wipe above).)
 
-  -- The closed session's window survived the buffer wipe: keep the same split
-  -- and swap the successor's buffer in (no window close/reopen, so the
-  -- statusline and bufferline get a single clean update instead of
-  -- flickering). Panel-driven: the cursor stays on the panel where the user
-  -- closed (rows shifted, refresh clamps it).
-  --
-  -- NOTE: unlike show_session/next_session (which park the zoom BEFORE
-  -- toggleterm churn), here the buffer is ALREADY wiped — and wiping a buffer
-  -- shown in two windows closes BOTH, so the zoom float is already gone and
-  -- zoom_win dangles invalid. Do NOT park-and-hide: zoom_buf still points at
-  -- the dead target buffer, which is exactly what keep_zoom below needs. And
-  -- `win` (the target's split) is gone for the same reason — the swap branch
-  -- below only runs when some OTHER window survived showing a live session.
+  -- The window survived the wipe: keep the same split and swap the
+  -- successor's buffer in (a single clean statusline update, no flicker).
+  -- Unlike show_session/next_session, no park here — the buffer is ALREADY
+  -- wiped, so the zoom float is already gone and zoom_win dangles invalid;
+  -- zoom_buf's dead pointer is exactly what keep_zoom below needs, and `win`
+  -- only survives when some OTHER window was showing a live session.
   if U.valid_win(win) then
     close_all_open_windows(next_session.term)
     vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
     next_session.term.window = win
     current = next_session
-    -- The window inherited the closed session's highlights; apply the new
-    -- session's.
+    -- Apply the successor's highlights; re-strip the cursorline/column.
     require('toggleterm.ui').hl_term(next_session.term)
     U.plain_terminal_window(win) -- and re-strip the cursorline/cursorcolumn
     panel.open()
@@ -947,9 +863,8 @@ function M.close_current(target, close_opts)
       -- Reopen on the successor from the kept cursor home.
       zoom_buffer(next_session.term.bufnr, true)
     elseif zoom_buf ~= shell_buf and zoom_buf and U.valid_buf(zoom_buf) then
-      -- A live zoom on some OTHER buffer (shell zoom, or a parked state from
-      -- churn elsewhere): rebuild it — close_all_open_windows above may have
-      -- seen its terminal buffer and taken its window down.
+      -- A live zoom on some OTHER buffer: rebuild it — close_all_open_windows
+      -- above may have taken its window down.
       resync_zoom()
     else
       drop_dead_zoom()
@@ -962,15 +877,11 @@ function M.close_current(target, close_opts)
     return
   end
 
-  -- The closed session's window went away with its buffer (the common case
-  -- when zoomed: the wipe closes BOTH the split and the float). The successor
-  -- opens through the normal path — which repoints a parked/live session zoom
-  -- onto it (see show_session). A parked keep_zoom therefore just needs its
-  -- buffer intent re-armed: zoom_buf still points at the DEAD target buffer,
-  -- so point it at the successor (or clear it when the successor can't take
-  -- a zoom) before show_session reads it. A stale zoom_win id from the
-  -- torn-down float must go, or zoom_repoint would take the win_set_buf path
-  -- on it.
+  -- The window went away with its buffer (the common case when zoomed: the
+  -- wipe closes BOTH split and float). The successor opens through the normal
+  -- path, which repoints a parked/live session zoom onto it — a parked
+  -- keep_zoom just re-arms its intent (zoom_buf → successor; the stale
+  -- zoom_win must go, or zoom_repoint would win_set_buf on a dead id).
   if keep_zoom then
     zoom_win = nil
     zoom_buf = next_session.term.bufnr
@@ -980,34 +891,29 @@ function M.close_current(target, close_opts)
     return
   end
   if window_open(next_session.term) then
-    -- Background close: nothing on screen was showing the closed session, so
-    -- only the rows shrink.
+    -- Background close: only the rows shrink.
     panel.refresh()
     return
   end
   -- The DISPLAYED session was closed (panel-driven): show the successor
   -- through the normal path — panel.stepping keeps show_session from letting
-  -- toggleterm request insert mode. No panel.step is driving this close, so
-  -- re-claim the panel one scheduled pass later — FIFO behind any startinsert
-  -- closures toggleterm queued, which fire harmlessly on the terminal.
+  -- toggleterm request insert. Re-claim the panel one scheduled pass later,
+  -- FIFO behind the queued startinserts (harmless on the terminal).
   panel.stepping = stepping
   show_session(next_session)
   panel.stepping = false
   panel.reclaim_focus()
 end
 
---- Is any claude session window currently displayed in the UI?
---- Used to enforce mutual exclusion with regular terminals: opening a
---- terminal closes a visible session window first (see close_window), and
---- opening a session closes open terminals via close_all_open_windows.
+--- Is any session window displayed? The mutual-exclusion gate with regular
+--- terminals: opening a terminal closes a visible session window first, and
+--- opening a session closes open terminals.
 function M.is_visible()
   return displayed_session() ~= nil
 end
 
---- Close the displayed session window(s) without killing their processes.
---- The split closes, the closed session is remembered as last_closed so <C-s>
---- can bring it back, and current is cleared. Returns true if any window was
---- closed.
+--- Close the displayed session window(s) without killing processes; the
+--- closed session is remembered as last_closed for <C-s>.
 function M.close_window()
   local closed = false
   for _, s in ipairs(sessions) do
@@ -1028,9 +934,8 @@ function M.has_sessions()
   return #sessions > 0
 end
 
---- Rename session `i` (1-based, panel row). An empty result restores the
---- default `claude` name and re-enables renumbering for it; a custom name
---- survives later renumbers (creates/closes reshuffle the others around it).
+--- Rename session `i` (empty restores the default `claude`; a custom name
+--- survives renumbers).
 function M.rename(i, new_name)
   local s = sessions[i]
   if not s then return end
@@ -1046,10 +951,9 @@ function M.rename(i, new_name)
   panel.refresh()
 end
 
---- <C-s>: cycle sessions. With a single session, toggle its window
---- open/closed. With multiple, if no session window is displayed, show the
---- most recently closed one; otherwise switch to the next session in the
---- list (wrapping around).
+--- <C-s>: cycle sessions — single session toggles its window; multiple with
+--- none displayed show the last closed; otherwise the next in the list
+--- (wrapping).
 function M.next_session()
   if #sessions == 0 then
     notify('No claude sessions. Press <C-a> to create one.', vim.log.levels.WARN)
@@ -1069,21 +973,19 @@ function M.next_session()
     return
   end
 
-  -- Pick the target: the session after the displayed one (wrapping), or —
-  -- nothing displayed — the last closed one, else the most recent. last_closed
-  -- is only ever set to live records (drop_record clears it), so it needs no
-  -- liveness check.
+  -- Target: the session after the displayed one (wrapping), or the last
+  -- closed, else the most recent. last_closed is only ever set to live
+  -- records (drop_record clears it) — no liveness check needed.
   local displayed, displayed_index = displayed_session()
   local target = displayed and sessions[displayed_index % #sessions + 1]
     or last_closed
     or sessions[#sessions]
 
   if window_open(target.term) then
-    -- Close any other open toggleterm window (e.g. a zsh terminal) so the
-    -- session alone is displayed, then focus it. Hide the zoom float first:
-    -- it shows a terminal buffer and would otherwise count as an open
-    -- terminal window (see hide_zoom_for_churn); a session zoom repoints onto
-    -- the target, a shell zoom rebuilds when its buffer is still alive.
+    -- Hide the zoom float first (it would count as an open terminal window —
+    -- see hide_zoom_for_churn), close any other open toggleterm window, then
+    -- focus the target: a session zoom repoints onto it, a shell zoom
+    -- rebuilds while its buffer lives.
     local was_zoomed = hide_zoom_for_churn()
     close_all_open_windows(target.term)
     current = target
@@ -1103,18 +1005,15 @@ function M.next_session()
   show_session(target)
 end
 
---- Statusline indicator: one dot per session.
----   •  window open (idle)        ◦  window closed (idle)
---- busy sessions blink — the dot shows on one refresh and disappears (a
---- blank of the same width) on the next, so a busy session reads as a
---- flashing dot. Width is kept stable across phases so neighbouring dots
---- don't shuffle left/right while blinking.
+--- Statusline indicator: one dot per session — • open, ◦ closed (idle);
+--- busy sessions blink (a blank of the same width on alternate phases, so
+--- neighbouring dots never shuffle).
 function M.statusline_indicator()
   if #sessions == 0 then
     return ''
   end
-  -- Pure read: the phase advances once per poll tick (see poll_tick), so the
-  -- blink keeps a steady cadence no matter how often lualine evaluates this.
+  -- Pure read: the phase advances once per poll tick, so the blink keeps a
+  -- steady cadence no matter how often lualine evaluates this.
   local parts = {}
   for _, s in ipairs(sessions) do
     if session_busy(s) and not blink_on then
@@ -1126,8 +1025,8 @@ function M.statusline_indicator()
   return table.concat(parts, ' ')
 end
 
---- Define the keymaps and autocmds. Called once at plugin load; a later call
---- (e.g. from a lazy.nvim `config` block) only merges in options.
+--- Keymaps and autocmds. Called once at plugin load; a later call only
+--- merges in options.
 function M.setup(user_opts)
   opts = vim.tbl_deep_extend('force', opts, user_opts or {})
   if setup_done then return end
@@ -1139,11 +1038,9 @@ function M.setup(user_opts)
   vim.keymap.set({ 'n', 't' }, '<C-e>', function() diff.step_next() end,
     { noremap = true, silent = true, desc = 'Next changed file (diff panel)' })
   vim.keymap.set('t', '<C-d>', function()
-    -- ON the shell split this key closes the shell, not the claude session
-    -- (that spelling stays for the session's own terminal — the mapping's
-    -- original contract). Matched by BUFFER, not window: a shell zoom shows
-    -- the same buffer in the fullscreen float, and <C-d> there must still mean
-    -- "close the shell".
+    -- ON the shell split this key closes the shell, not the session. Matched
+    -- by BUFFER, not window: a shell zoom shows the same buffer in the
+    -- float, and <C-d> there must still mean "close the shell".
     local cur_buf = vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())
     if U.valid_buf(shell_buf) and cur_buf == shell_buf then
       close_shell()
@@ -1157,20 +1054,16 @@ function M.setup(user_opts)
   vim.keymap.set({ 'n', 't' }, '<C-space>', function() M.toggle_zoom() end,
     { noremap = true, silent = true, desc = 'Zoom session/shell fullscreen' })
 
-  -- Remember manually closed session windows (e.g. :close, <C-w>c, q) so
-  -- <C-s> can bring the most recently closed session back — and drop the
-  -- panel when the last displayed window goes: closing the window directly
-  -- bypasses close_window(), which is where the panel usually learns about
-  -- visibility changes. WinClosed fires while the window is still valid
-  -- (nvim tears it down after the event), so is_visible() would read true and
-  -- keep the panel — defer the sync one event-loop pass, when the window is
-  -- really gone.
+  -- Remember manually closed session windows (e.g. :close, <C-w>c) for <C-s>
+  -- — and drop the panel when the last displayed window goes. WinClosed fires
+  -- while the window is still valid, so is_visible() would read true; defer
+  -- the sync one pass, when the window is really gone.
   vim.api.nvim_create_autocmd('WinClosed', {
     callback = function(args)
       local wid = tonumber(args.match)
-      -- The zoom float closed from the outside (:close on it, a layout wipe):
-      -- forget it and rebuild it one pass later when its buffer is still alive
-      -- (diff pane moves take the float down; the buffer survives).
+      -- The zoom float closed from the outside: forget it and rebuild one
+      -- pass later when its buffer is still alive (diff pane moves take the
+      -- float down; the buffer survives).
       if wid == zoom_win then
         vim.schedule(resync_zoom)
         return
@@ -1194,10 +1087,9 @@ function M.setup(user_opts)
     end,
   })
 
-  -- Toggleterm force-resets ft='toggleterm' on every TermEnter (its
-  -- handle_term_enter FIXME), which would let lualine's toggleterm extension
-  -- replace the statusline again on refocus. Restore 'claude' for tagged
-  -- buffers whenever the reset fires (FileType is synchronous on any ft set).
+  -- Toggleterm force-resets ft='toggleterm' on every TermEnter, which would
+  -- let lualine's extension replace the statusline again on refocus. Restore
+  -- 'claude' for tagged buffers (FileType fires synchronously on any set).
   vim.api.nvim_create_autocmd('FileType', {
     pattern = 'toggleterm',
     callback = function()
@@ -1207,18 +1099,13 @@ function M.setup(user_opts)
     end,
   })
 
-  -- No cursorline/cursorcolumn in terminal windows, wherever a terminal
-  -- buffer lands (see util.TERMINAL_PLAIN for why): the global options only
-  -- paint behind a terminal's own cursor, and the paint goes stale on every
-  -- window switch. Covers toggleterm's own opens and plain terminals outside
-  -- this plugin's windows; the plugin's own terminal windows are stripped
-  -- directly at their open sites. Both hooks are needed — BufWinEnter fires
-  -- when an EXISTING terminal buffer is displayed in a window, TermOpen when
-  -- termopen flips an already-displayed buffer into one (toggleterm's fresh
-  -- open is exactly that order: split first, spawn second). One cosmetic
-  -- tradeoff, accepted: a window that shows a terminal buffer keeps the strip
-  -- if it later shows a file — every window here that shows a terminal shows
-  -- one forever.
+  -- Strip cursorline/cursorcolumn wherever a terminal buffer lands (see
+  -- util.TERMINAL_PLAIN for why) — the plugin's own windows are stripped at
+  -- their open sites; these hooks cover toggleterm's opens and plain
+  -- terminals elsewhere. Both are needed: BufWinEnter fires when an EXISTING
+  -- terminal buffer is displayed, TermOpen when termopen flips an
+  -- already-displayed buffer into one (toggleterm's fresh open: split first,
+  -- spawn second).
   local function strip_terminal_windows(buf)
     for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
       local ok, b = pcall(vim.api.nvim_win_get_buf, w)
@@ -1238,8 +1125,8 @@ function M.setup(user_opts)
   panel.setup()
   diff.setup()
 
-  -- The diff panel needs a tree window to split above; the tree closing (or
-  -- the last displayed session closing) takes the diff panel with it.
+  -- The diff panel needs a tree window to split above; the tree closing
+  -- takes it with it.
   vim.api.nvim_create_autocmd('FileType', {
     pattern = 'NvimTree',
     callback = function() diff.sync(M.is_visible()) end,
