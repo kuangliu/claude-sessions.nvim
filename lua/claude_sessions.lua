@@ -527,7 +527,7 @@ end
 
 --- Is the zoom float (still) up?
 zoomed = function()
-  return zoom_win ~= nil and U.valid_win(zoom_win)
+  return U.valid_win(zoom_win)
 end
 
 --- Forget a zoom whose window is already gone AND whose buffer is dead (a
@@ -696,10 +696,9 @@ end
 -- --- Display ----------------------------------------------------------------
 
 --- Close the window of every displayed toggleterm terminal except `keep`.
---- Window-only: processes keep running. This guarantees the kept session alone
---- occupies the right side, and preserves the old zsh<->claude mutual
---- exclusion from util.toggle_term. Remembers the most recently closed
---- session for <C-s>.
+--- Window-only: processes keep running. Guarantees the kept session alone
+--- occupies the right side — at most one of {claude session, plain terminal}
+--- is visible at a time. Remembers the most recently closed session for <C-s>.
 local function close_all_open_windows(keep)
   local closed_any = false
   for _, term in ipairs(require('toggleterm.terminal').get_all()) do
@@ -829,8 +828,6 @@ local function on_session_exit(record)
 end
 
 -- --- Public API -------------------------------------------------------------
-
-
 
 --- Create a NEW session and open it on the right.
 function M.create()

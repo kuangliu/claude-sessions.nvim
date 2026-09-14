@@ -109,21 +109,14 @@ function U.entry_count(lines)
   return math.floor(lines / 3)
 end
 
---- Display width of a short panel string. Every rune the panels draw (gutter
---- arrow, state symbols, spinner frames, the bar's boxes) is single-width,
---- but NOT single-BYTE — `ᐅ`/`✓`/`⠋`/`▪` are 3 bytes — so padding and extmark
---- columns need the rune count, not `#`.
-function U.rune_len(str)
-  return vim.fn.strcharlen(str)
-end
-
 --- Right-pad `s` with spaces to `width` display columns (a no-op past width).
 --- Full-width rows are how a selected entry's block background spans its
 --- panel: a plain row mark stops at the row's own end, so the row itself is
 --- padded rather than extended with hl_eol (whose semantics proved
---- unreliable across nvim builds).
+--- unreliable across nvim builds). strcharlen, not #: every rune the panels
+--- draw (ᐅ/✓/⠋/▪) is single-width but multi-byte.
 function U.pad_to(s, width)
-  local pad = math.max(width - U.rune_len(s), 0)
+  local pad = math.max(width - vim.fn.strcharlen(s), 0)
   return pad > 0 and s .. string.rep(' ', pad) or s
 end
 

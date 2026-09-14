@@ -49,7 +49,7 @@ local CURSOR_HL = 'ClaudeSessionsPanelCursor'
 -- everyday files fill most of the bar.
 local BAR_SCALE = 100
 local BAR_BLOCKS = 12 -- blocks in a full-width bar
-local BAR_BLOCK = '▪' -- single display column, 3 bytes (U.rune_len rules)
+local BAR_BLOCK = '▪' -- single display column, 3 bytes (count columns, not bytes)
 
 -- Both rendered rows share the same one-space + indent prefix, so they align
 -- at column `1 + #RENDER_INDENT` — the offset every counts/bar mark assumes.
@@ -184,8 +184,8 @@ end
 --- Render the files as three rows per entry (name / counts / blank), with the
 --- selected entry's two rows padded to the window's width so its block
 --- background spans full-width, and the marks that color the pieces. All
---- extmark columns are BYTE offsets; the pad arithmetic is RUNE count
---- (U.rune_len — the bar's ▪ blocks are 3 bytes apiece).
+--- extmark columns are BYTE offsets; the pad arithmetic is display-column
+--- count (the bar's ▪ blocks are 3 bytes apiece).
 local function render(files)
   local lines, marks = {}, {}
   -- The file the cursor selects, derived once per repaint: the block follows
