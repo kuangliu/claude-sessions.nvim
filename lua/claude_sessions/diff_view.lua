@@ -1,19 +1,17 @@
 -- The diff pane: when the sidebar diff panel selects a file (an explicit j/k
 -- or <C-e> — the panel's opening never selects), the file's
--- working-tree-vs-HEAD diff is rendered here via diffview.nvim's engine — the
--- same GitHub-style unified view (full-file, word-diffed, treesitter-lifted,
--- gitsigns gutter bars, hunk navigation) — and it edits: d reverts the
--- cursor line's change (u undoes), D reverts the whole file, c commits.
+-- working-tree-vs-HEAD diff is rendered here via diffview.nvim's engine —
+-- the same GitHub-style unified view (full-file, word-diffed,
+-- treesitter-lifted, gitsigns gutter bars, hunk navigation) — and it edits:
+-- d reverts the cursor line's change (u undoes), D reverts the whole file, c
+-- commits.
 --
--- The adapter owns only the plumbing around the engine: resolve the HEAD and
--- working copies, build the view rows, paint them into a scratch buffer, and
--- show it diffview-style — the pane TAKES OVER the editor window: the user's
--- file steps aside (buffer, cursor and window options remembered), the diff
--- renders at the editor's own full width, and when the pane exits the file
--- comes back exactly as it left. Only when no editor window exists (nothing
--- on screen but the sessions layout) does the pane fall back to a vsplit
--- beside the session terminal. diffview stays a soft dependency: with it
--- absent show() is a no-op and the panel behaves exactly as before.
+-- The adapter owns only the plumbing: resolve the HEAD and working copies,
+-- build the view rows, paint them into a scratch buffer, and show it
+-- diffview-style — the pane TAKES OVER the editor window (buffer, cursor and
+-- window options remembered; restored exactly on exit), falling back to a
+-- vsplit beside the session terminal only when no editor window exists.
+-- diffview stays a soft dependency: with it absent show() is a no-op.
 
 local U = require('claude_sessions.util')
 
@@ -21,26 +19,21 @@ local M = {}
 
 M.win = nil
 M.buf = nil
--- The editor window the pane took over, as { buf, cursor, opts } — what the
--- take-over found there and what restore hands back. Nil when the pane lives
--- in its own split (no editor window was on screen to take over).
+-- The editor window the pane took over, as { buf, cursor, opts }. Nil when
+-- the pane lives in its own split.
 M.replaced = nil
 
 -- Bound by claude_sessions.lua's wiring section (the panel/module pattern):
--- the pane's working-tree edits own the cursor and the render, the diff
--- panel owns the rows and the git work. discard_path(root, path, done) runs
--- the prompted whole-file discard (D); commit(root, message, done) stages
--- everything and commits on jobs (c); reprobe() re-probes the rows and lets
--- a live pane follow the pin — the tail every edit lands in.
+-- discard_path(root, path, done) runs the prompted whole-file discard (D);
+-- commit(root, message, done) stages and commits (c); reprobe() is the tail
+-- every edit lands in.
 M.discard_path = nil
 M.commit = nil
 M.reprobe = nil
 
 -- The pane's last render target, { rel, root }: a show() of the same pair
--- while the pane is up skips the engine pipeline — the focus-flip arrival pass
--- re-selects the landed entry on every flip, and a step can land a file the
--- pane already shows. Two git spawns, a working-file read and a two-sided
--- treesitter parse are too heavy to run twice per keystroke.
+-- while the pane is up skips the engine pipeline — two git spawns and a
+-- two-sided treesitter parse are too heavy to run twice per keystroke.
 local last_target = nil
 
 -- Soft dependency: the engine modules, or nil when diffview.nvim is not
@@ -51,31 +44,25 @@ if ok then
   git = require('diffview.git')
 end
 
---- Is the pane window (still) up? The gate for every entry here, and the one
---- read diff.lua's focus pass makes: a focus flip may only re-render a LIVE
---- pane — a dismissal (the q keymap, a manual window close) must not be
---- resurrected by one; only an explicit selection (j/k, <C-e>) shows the
---- pane again.
+--- Is the pane window (still) up? The gate for every entry here — a focus
+--- flip may only re-render a LIVE pane (a dismissal must not be resurrected);
+--- only an explicit selection shows the pane again.
 function M.active()
   return U.valid_win(M.win)
 end
 
--- The pane's look: util's plain-text look, plus the signcolumn the
--- gitsigns-style add/del bars draw in. One table spells the whole look —
--- plain_diff_window applies it, and the take-over captures/restores exactly
--- these keys, so the pane's look can never leak onto the user's window.
+-- The pane's look: util's plain-text look plus the signcolumn the add/del
+-- bars draw in. One table — the take-over captures/restores exactly these
+-- keys, so the pane's look never leaks onto the user's window.
 local PANE_LOOK = U.plain_look({ signcolumn = 'yes:1' })
 
 local function plain_diff_window(win)
   U.apply_winopts(win, PANE_LOOK)
 end
 
---- Hand the taken-over editor window back: the pane's window options come
---- off, the user's buffer and cursor return. `win` invalid (a manual :close
---- took the window with the diff still in it): open the buffer in a fresh
---- split instead — anchored on the tree when there is one, the pane's home
---- territory — so the restore holds whatever way the pane ended. Clears
---- M.replaced either way; a no-op when nothing was taken over.
+--- Hand the taken-over editor window back. `win` invalid (a manual :close):
+--- open the buffer in a fresh split anchored on the tree. Clears M.replaced
+--- either way; no-op when nothing was taken over.
 local function restore_replaced(win)
   local saved = M.replaced
   M.replaced = nil
@@ -93,24 +80,20 @@ local function restore_replaced(win)
 end
 
 --- The pane is gone: forget the window and hand a taken-over editor window
---- back — `win` nil (or already dead) means the window died on its own and
---- restore rehomes the file. One spelling of the teardown, shared by the
---- WinClosed pass and M.close.
+--- back — one spelling of the teardown, shared by the WinClosed pass and
+--- M.close.
 local function release(win)
   M.win = nil
   restore_replaced(win)
 end
 
--- Build the view buffer once: a named nofile scratch in diffview's shape —
--- the same look view.lua gives its view buffers (and the b-vars render.render
--- writes are what the hunk-jump scan below reads). The buffer survives across
--- shows (bufhidden=hide), so its birth state lives here — the keymaps, and
--- the one WinClosed that forgets/rehomes when the pane window dies on its own
--- (per pane buffer, not per show: per-show would stack one autocmd per reopen
--- cycle on this long-lived buffer).
+-- Build the view buffer once: a named nofile scratch in diffview's shape
+-- (the b-vars render.render writes are what the hunk-jump scan reads). The
+-- buffer survives across shows (bufhidden=hide), so its birth state lives
+-- here — the keymaps, and the one WinClosed (per pane buffer, not per show).
 
--- A row carrying a content change — added or removed. Context, separator and
--- header rows are not: the hunk jumps and the d edit key on this.
+-- A row carrying a content change — added or removed. The hunk jumps and the
+-- d edit key on this.
 local function change_row(r)
   return r and (r.kind == 'add' or r.kind == 'del') or false
 end
@@ -127,9 +110,8 @@ local function create_buf()
   return buf
 end
 
---- Jump to the next/previous change hunk (]]/[[). A hunk is a contiguous run
---- of add/del rows, header and separator rows break it — the same scan the
---- view's jump spells against diffview_rows, read off the pane's own buffer.
+--- Jump to the next/previous change hunk (]]/[[) — a contiguous run of
+--- add/del rows, read off the pane's own buffer.
 local function jump_hunk(d)
   local buf = vim.api.nvim_get_current_buf()
   local rows = vim.b[buf].diffview_rows
@@ -164,8 +146,9 @@ local function jump_hunk(d)
 end
 
 --- <CR>: open the source file of the row under the cursor, at that row's
---- new-side line (removed rows have none — the nearest earlier context/add
---- line then stands in).
+--- new-side line (removed rows have none — the nearest earlier line stands
+--- in). The pane's WINDOW stays; the next selection re-renders over the
+--- file.
 local function jump_to_source()
   local buf = vim.api.nvim_get_current_buf()
   local abspath = vim.b[buf].diffview_abspath
@@ -190,25 +173,22 @@ end
 -- working-tree edits (d / u), whole-file revert (D), commit (c)
 --------------------------------------------------------------------------
 -- Migrated from diffview's actions: the view rows carry the old/new line
--- numbers the edits need — a d on an added row deletes that line from the
--- working file, on a removed row it restores the line into it (exact for
--- end-of-file deletions and del runs behind add hunks), each edit is pushed
--- on the undo stack for u, D reverts the whole shown file through the diff
--- panel's discard machinery, and c stages everything and commits — the
--- review is of the whole workspace, so the commit is too. The rows are the
--- view's source of truth; the working file is the edits': a stale view (the
--- file changed underneath) refuses the edit rather than guessing.
+-- numbers the edits need — d on an added row deletes that line from the
+-- working file, on a removed row it restores the line into it, each edit is
+-- pushed on the undo stack for u, D reverts the whole shown file through the
+-- diff panel's discard machinery, and c stages everything and commits. The
+-- rows are the view's source of truth; the working file is the edits': a
+-- stale view (the file changed underneath) refuses the edit rather than
+-- guessing.
 
 -- The d edits' undo stack — module-local on purpose: each entry holds two
--- whole-file snapshots, and a vim.b stack would deep-copy all of them
--- through VimL on every push. The depth cap bounds the retention; the stack
--- dies with the review (M.close).
+-- whole-file snapshots, and a vim.b stack would deep-copy them through VimL
+-- on every push. Depth-capped; dies with the review (M.close).
 local undo_stack = {}
 local UNDO_DEPTH = 20
 
---- The file the pane shows, resolved for the edits: `rel` (repo-relative, as
---- the rows carry it), `root`, and `path` (absolute — the working file). Nil
---- when no live target.
+--- The file the pane shows, resolved for the edits: `rel` (repo-relative),
+--- `root`, and `path` (absolute). Nil when no live target.
 local function edit_target()
   if not (M.active() and last_target) then return nil end
   return {
@@ -226,9 +206,8 @@ local function join_lines(ls, want_newline)
   return out
 end
 
--- Write `content` to the working file; nil means the pre-edit file was absent
--- (a deleted file being restored, or reverted to absent again), so remove it.
--- Returns false after notifying when the filesystem call fails.
+-- Write `content` to the working file; nil means the pre-edit file was
+-- absent, so remove it. Returns false after notifying on failure.
 local function write_working_file(abspath, content)
   if content == nil then
     local ok, err = os.remove(abspath)
@@ -249,8 +228,8 @@ local function write_working_file(abspath, content)
   return true
 end
 
--- The working file as the edits see it: lines, the row's own content with
--- the render's sign char stripped, and whether the file ends with a newline.
+-- The working file as the edits see it: lines, the row's content with the
+-- render's sign char stripped, and whether the file ends with a newline.
 local function read_working(path, r)
   local raw = git.read_file_raw(path)
   return raw and git.lines(raw) or {}, r.text:sub(2),
@@ -265,7 +244,7 @@ local function cursor_row(buf)
   return sline - offset
 end
 
--- Revert an added line: delete it from the working file. Returns the new file
+-- Revert an added line: delete it from the working file. Returns the new
 -- content and the undo entry; nil content if the view is stale.
 local function revert_add(t, r)
   local ls, content, trailing_new, raw = read_working(t.path, r)
@@ -276,12 +255,9 @@ local function revert_add(t, r)
 end
 
 -- Revert a removed line: restore it into the working file at the new-side
--- position of its old line. The old-side number minus the deleted lines
--- before it, plus the added lines before it (a surviving old line maps to
--- one new line, and an added line also occupies one slot ahead of this line
--- in the new file). Exact for every case — including end-of-file deletions,
--- where vim.diff anchors the hunk at the new side's start, and del runs that
--- follow earlier add hunks.
+-- position of its old line (old-side number minus deleted lines before it,
+-- plus added lines before it). Exact for end-of-file deletions and del runs
+-- that follow earlier add hunks.
 local function revert_del(t, rows, idx)
   local r = rows[idx]
   local ls, content, trailing_new, raw = read_working(t.path, r)
@@ -305,8 +281,7 @@ local function revert_del(t, rows, idx)
   end
 
   -- a restored line landing at the END of a file that lacks a trailing
-  -- newline inherits one from the HEAD side, so the revert shows as complete
-  -- instead of a lone newline diff
+  -- newline inherits one from the HEAD side, so the revert shows complete.
   local old_trailing = false
   if at_end and not trailing_new then
     local old_raw = git.git_show_raw(t.root, 'HEAD:' .. t.rel)
@@ -317,22 +292,16 @@ local function revert_del(t, rows, idx)
   return out, { kind = 'del', pos = pos, old_line = r.oldln, before = raw, after = out }
 end
 
--- Finish a working-tree edit: the panel's probes start first (their
--- callbacks land once this chunk yields — after the re-render below, whose
--- same-target skip keeps the re-probe's pane follow from double-rendering),
--- and the re-probe's checktime reloads open buffers to the new content. The
--- re-render is forced: the target did not change but its content did.
+-- Finish a working-tree edit: re-probe (checktime reloads open buffers),
+-- then a FORCED re-render — the target did not change but its content did.
 local function after_edit(t)
   M.reprobe()
   M.show(t.rel, t.root, true)
 end
 
---- d: revert the change on the cursor line — an added line is deleted from
---- the working file, a removed line is restored into it. The edit is written
---- straight to disk (the view's source of truth), the view re-renders and
---- the cursor moves to the next remaining change line. Each edit is pushed
---- onto the undo stack as before/after content snapshots, so `u` can restore
---- the exact prior state.
+--- d: revert the change on the cursor line — added deleted from the working
+--- file, removed restored into it. Each edit pushes before/after content
+--- snapshots onto the undo stack for `u`.
 function M.revert_line()
   local buf = vim.api.nvim_get_current_buf()
   local t = edit_target()
@@ -364,9 +333,8 @@ function M.revert_line()
 
   after_edit(t)
 
-  -- land the cursor on the next remaining change line. The re-render keeps
-  -- the cursor's line number, so scan forward from there — the row under it
-  -- may now hold the rest of the same hunk, which still counts as "next".
+  -- land the cursor on the next remaining change line — the row under it may
+  -- now hold the rest of the same hunk, which still counts as "next".
   local rows2 = vim.b[buf].diffview_rows
   local off2 = vim.b[buf].diffview_offset or 0
   for i = math.max(vim.api.nvim_win_get_cursor(0)[1], off2 + 1), vim.api.nvim_buf_line_count(buf) do
@@ -377,10 +345,9 @@ function M.revert_line()
   end
 end
 
---- u: reverse the most recent d. The working file must still match the
---- recorded after-state (otherwise the entry is stale and gets dropped); it
---- is then restored to the exact recorded before-state. The cursor returns
---- to the row the d touched.
+--- u: reverse the most recent d — restore the exact recorded before-state
+--- (a stale entry, file moved under the stack, is dropped). The cursor
+--- returns to the row the d touched.
 function M.undo_revert()
   local buf = vim.api.nvim_get_current_buf()
   local t = edit_target()
@@ -423,11 +390,9 @@ function M.undo_revert()
   end
 end
 
---- D: revert the whole shown file — the diff panel's <C-d> machinery on the
---- pane's target (classify first: the pane has no row record to read the
---- flags off), with the same tail: buffers reload, the rows re-probe, and
---- the pin hands a live pane the cursor's next file — or the clean workspace
---- closes the review. The discard prompts its y/N.
+--- D: revert the whole shown file through the diff panel's discard
+--- machinery (classify first: the pane has no row record). The discard
+--- prompts its y/N.
 function M.revert_file()
   local buf = vim.api.nvim_get_current_buf()
   local t = edit_target()
@@ -438,9 +403,8 @@ function M.revert_file()
   M.discard_path(t.root, t.rel, M.reprobe)
 end
 
---- c: prompt for a commit message, stage everything and commit. The review
---- is of the whole workspace, so the commit is too (diffview's spelling).
---- The re-probe on the landing closes the review when the commit emptied it.
+--- c: prompt for a commit message, stage everything and commit (the review
+--- is of the whole workspace, so the commit is too — diffview's spelling).
 function M.commit_changes()
   local t = edit_target()
   if not t then return end
@@ -463,8 +427,7 @@ function M.commit_changes()
 end
 
 -- The pane's keymaps: q closes it, ]]/[[ jump hunks, <CR> opens the source,
--- d/u revert (and undo the revert of) the cursor line, D reverts the whole
--- file, c commits.
+-- d/u revert (and undo), D reverts the file, c commits.
 local function set_keymaps(buf)
   U.map_key(buf, ']]', function() jump_hunk(1) end, 'next change')
   U.map_key(buf, '[[', function() jump_hunk(-1) end, 'prev change')
@@ -475,11 +438,9 @@ local function set_keymaps(buf)
   U.map_key(buf, 'c', M.commit_changes, 'commit changes')
 end
 
---- The editor window the pane takes over: a real (non-floating) window whose
---- buffer is a NORMAL one — no terminal, no qf/help, nothing of the sessions
---- layout. The LARGEST such window wins: the main editor area, when several
---- code windows share the row. Nil when the screen holds nothing but the
---- sessions layout.
+--- The editor window the pane takes over: a real (non-floating) window with
+--- a NORMAL buffer (no terminal, no qf/help). The LARGEST such window wins.
+--- Nil when the screen holds nothing but the sessions layout.
 local function editor_window()
   local best, best_area = nil, -1
   for _, w in ipairs(U.real_windows()) do
@@ -492,13 +453,9 @@ local function editor_window()
   return best
 end
 
---- Show the pane buffer's window: reuse the pane's own window when it is
---- still up; else TAKE OVER an editor window (the user's file steps aside —
---- buffer, cursor and window options remembered in M.replaced; restore is
---- release's job); else — nothing but the sessions layout on screen — split
---- one beside the session terminal, seeded at the terminal's own width
---- (`columns * 0.4`, the sessions config's vertical size), so the pane and
---- the terminal read as one pair.
+--- Show the pane buffer's window: reuse the pane's own window when up; else
+--- TAKE OVER an editor window (captured in M.replaced; release restores);
+--- else split one beside the session terminal at the terminal's own width.
 local function show_window(buf)
   if M.active() then
     if vim.api.nvim_win_get_buf(M.win) ~= buf then
@@ -523,13 +480,10 @@ local function show_window(buf)
     }
     win = editor
   else
-    -- Host for the split: a displayed session window keeps the pane beside
-    -- the terminal — BETWEEN the tree and the terminal (the sidebar's file
-    -- list reading straight into its diff), not the far right the global
-    -- `splitright` would put it. `splitright = false` while the split lands
-    -- puts the pane on the terminal's left; the one-split flip is restored
-    -- before anything else can read it. No session on screen: plain vsplit
-    -- from where we are.
+    -- Host for the split: a displayed session window keeps the pane BETWEEN
+    -- the tree and the terminal, not the far right the global `splitright`
+    -- would put it — flip splitright off for the one split. No session on
+    -- screen: plain vsplit from where we are.
     local host = U.window_with_filetype('claude')
     local prev = vim.api.nvim_get_current_win()
     U.focus(host)
@@ -541,8 +495,8 @@ local function show_window(buf)
     vim.cmd('vertical resize ' .. math.max(20, math.floor(vim.o.columns * 0.4)))
     handback = prev -- the split stole focus; hand it back once landed
   end
-  -- One landing for both placements: the pane's buffer, its plain look, at
-  -- the top.
+  -- One landing for both placements: the pane's buffer, its look, at the
+  -- top.
   vim.api.nvim_win_set_buf(win, buf)
   plain_diff_window(win)
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
@@ -552,36 +506,31 @@ local function show_window(buf)
   M.win = win
 end
 
---- Render the diff of `rel` (a repo-relative path, as the diff panel's rows
---- carry) against `root`, and show it in the pane. No-op without the engine
---- (diffview absent) or a root. Reuses the pane window and buffer across
---- calls, so stepping files re-renders in place. `force` re-renders a same
---- target — the working-tree edits (d/u) changed what the diff shows, and a
---- fresh render must not be skipped for being "already there".
+--- Render the diff of `rel` against `root` and show it in the pane. No-op
+--- without the engine (diffview absent) or a root. Reuses the pane window and
+--- buffer across calls, so stepping files re-renders in place. `force`
+--- re-renders a same target — the working-tree edits changed what the diff
+--- shows.
 function M.show(rel, root, force)
   if not (ok and render and git and rel and root) then return end
-  -- Same-target skip: the pane already shows this file's diff — a focus
-  -- arrival re-selects the landed entry on every flip, and a step lands a
-  -- file the pane may already be showing (a wrapped cycle revisits file
-  -- one). The skip leaves the pane (and its cursor) exactly as this show
-  -- would have; `force` (a working-tree edit) bypasses it.
+  -- Same-target skip: the focus-flip arrival pass re-selects the landed
+  -- entry on every flip, and a wrapped cycle revisits file one. `force` (a
+  -- working-tree edit) bypasses it.
   local same_target = M.active() and last_target ~= nil
     and last_target.rel == rel and last_target.root == root
   if same_target and not force then
     return
   end
   -- The render can flip focus twice (the split path's host move and
-  -- hand-back); the diff panel's focus-flip pass sees those as
-  -- arrivals/departures, but neither half holds a state to flip — the panel's
-  -- selection is pinned and a departure spells no close — so the flip pair
-  -- lands a repaint either way and stands.
+  -- hand-back); the diff panel's focus-flip pass lands a repaint either way
+  -- and stands — neither half holds a state to flip.
   last_target = { rel = rel, root = root }
 
   local old_raw = git.git_show_raw(root, 'HEAD:' .. rel) -- nil for untracked files
   local new_raw = git.read_file_raw(root .. '/' .. rel) -- nil for deleted files
   local rows, counts
   -- The binary probe is skipped on a forced re-render: the edit path just
-  -- round-tripped the file through text reads and writes, so it is text.
+  -- round-tripped the file through text reads and writes.
   if not force and git.is_binary(root, rel, root .. '/' .. rel) then
     rows = { render.row('Binary file differs (not shown)', 'del', nil, 1) }
     counts = { add = 0, del = 1 }
@@ -601,10 +550,9 @@ function M.show(rel, root, force)
   render.apply_treesitter(buf, root .. '/' .. rel, rows, old_raw, new_raw)
   show_window(buf)
 
-  -- Land the cursor on the first change (the header's end runs into it), so
-  -- the pane opens on the file's edits rather than its top. Fresh selections
-  -- only: a forced re-render (a d/u edit) keeps the working position — the
-  -- edit's own cursor logic decides where the cursor goes.
+  -- Land the cursor on the first change, so the pane opens on the file's
+  -- edits rather than its top. Fresh selections only — a forced re-render
+  -- keeps the working position.
   if same_target then return end
   vim.schedule(function()
     if not (U.valid_win(M.win) and U.valid_buf(buf)) then return end
@@ -619,10 +567,9 @@ function M.show(rel, root, force)
   end)
 end
 
---- Tear the pane down (window + buffer). The sidebar panels are untouched.
---- A taken-over editor window is NOT closed — it is the user's window: its
---- buffer, cursor and window options go back the way the take-over found
---- them, and only the pane's scratch buffer dies.
+--- Tear the pane down (window + buffer). A taken-over editor window is NOT
+--- closed — it is the user's window: restore gives it back what the
+--- take-over found; only the pane's scratch buffer dies.
 function M.close()
   if not M.replaced and M.active() then
     pcall(vim.api.nvim_win_close, M.win, true)
