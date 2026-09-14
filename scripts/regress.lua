@@ -267,6 +267,26 @@ elseif scenario == 'shell-zoom-lifecycle' then
   assert_(M.has_sessions(), 'sessions lost to the shell lifecycle')
   ok()
 
+elseif scenario == 'single-shell-zoom-cycle' then
+  -- ONE session, shell zoomed: <C-s> closes the session window underneath
+  -- without stealing focus from the float (toggleterm's origin-window restore
+  -- must not win), and the next <C-s> reopens onto the same float.
+  sessions(1)
+  M.toggle_shell()
+  M.toggle_zoom()
+  local zw = vim.api.nvim_get_current_win()
+  M.next_session() -- single-session close branch
+  assert_(vim.api.nvim_win_is_valid(zw), 'float gone after single-session close')
+  assert_(vim.api.nvim_get_current_win() == zw,
+    'focus left the zoom float on single-session close')
+  M.next_session() -- reopen branch
+  assert_(vim.api.nvim_get_current_win() == zw, 'focus not on the float after reopen')
+  assert_eq(vim.bo[vim.api.nvim_win_get_buf(zw)].filetype, 'claude-shell',
+    'float lost the shell')
+  M.toggle_zoom() -- unzoom lands on a real window
+  assert_(float_win() == nil, 'unzoom did not land on a real window')
+  ok()
+
 elseif scenario == 'zoomed-cb' then
   -- C-b while zoomed ONLY takes the float down; no shell window appears.
   sessions(2)

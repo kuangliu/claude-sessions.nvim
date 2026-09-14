@@ -967,6 +967,11 @@ function M.next_session()
       s.term:close()
       current = nil
       panel_sync()
+      -- term:close() restores focus to toggleterm's origin window — off the
+      -- zoom float. The float survives (the session's buffer lives on, and a
+      -- shell zoom rides the shell), so put focus back on it: the user was
+      -- typing there.
+      if zoomed() then focus(zoom_win) end
     else
       show_session(s)
     end
