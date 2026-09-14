@@ -561,6 +561,15 @@ unzoom = function()
   end
 end
 
+--- While zoomed, focus stays on the float (never the split); else focus `win`.
+local function focus_zoom_or(win)
+  if zoomed() then
+    focus(zoom_win)
+  else
+    focus(win)
+  end
+end
+
 --- Open the zoom float over `buf` (a terminal buffer). Never reuses a live
 --- window id: on the close_current path the wipe tears the float's window
 --- down but the `zoom_win` id can still test valid (see drop_dead_zoom), so
@@ -745,11 +754,7 @@ show_session = function(s)
   if window_open(s.term) then
     current = s
     panel.follow()
-    if zoomed() then
-      focus(zoom_win)
-    else
-      focus(s.term.window)
-    end
+    focus_zoom_or(s.term.window)
     return
   end
 
@@ -800,11 +805,7 @@ show_session = function(s)
   -- While zoomed the float holds focus (zoom_repoint already put it there);
   -- focusing the split instead would leave the user staring at the old layout
   -- with a live fullscreen float on top.
-  if zoomed() then
-    focus(zoom_win)
-  else
-    focus(s.term.window)
-  end
+  focus_zoom_or(s.term.window)
 end
 
 --- on_exit callback: auto-cleanup when a claude process ends.
@@ -957,11 +958,7 @@ function M.close_current(target, close_opts)
       drop_dead_zoom()
     end
     if not stepping then
-      if zoomed() then
-        focus(zoom_win)
-      else
-        vim.api.nvim_set_current_win(win)
-      end
+      focus_zoom_or(win)
       vim.cmd('startinsert')
       panel.follow()
     end
@@ -1103,11 +1100,7 @@ function M.next_session()
     else
       resync_zoom()
     end
-    if zoomed() then
-      focus(zoom_win)
-    else
-      target.term:focus()
-    end
+    focus_zoom_or(target.term.window)
     return
   end
   show_session(target)
