@@ -35,6 +35,18 @@ M.setup({})
 -- path calls. get_all must return every created terminal: the plugin's
 -- close_all_open_windows iterates it to enforce "one displayed session".
 local all_terms = {}
+
+-- A window-less job spawn into a fresh buffer — real toggleterm's
+-- Terminal:spawn; no toggle_number until a real open runs __set_options.
+local function spawn_buf(term)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_call(buf, function()
+    vim.fn.termopen('/bin/sh -c "sleep 100000"')
+  end)
+  term.bufnr = buf
+  return buf
+end
+
 package.loaded['toggleterm.terminal'] = {
   Terminal = {
     new = function(_, spec)
@@ -45,14 +57,10 @@ package.loaded['toggleterm.terminal'] = {
           vim.cmd('vsplit')
           local win = vim.api.nvim_get_current_win()
           if not (self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr)) then
-            local buf = vim.api.nvim_create_buf(false, true)
-            vim.api.nvim_win_set_buf(win, buf)
-            vim.fn.termopen('/bin/sh -c "sleep 100000"')
-            self.bufnr = buf
-            vim.b[buf].toggle_number = #all_terms + 1 -- real toggleterm: set on open
-          else
-            vim.api.nvim_win_set_buf(win, self.bufnr)
+            spawn_buf(self)
+            vim.b[self.bufnr].toggle_number = #all_terms + 1 -- real toggleterm: set on open
           end
+          vim.api.nvim_win_set_buf(win, self.bufnr)
           self.window = win
         end,
         close = function(self)
@@ -67,14 +75,9 @@ package.loaded['toggleterm.terminal'] = {
           end
         end,
         spawn = function(self)
-          -- Real toggleterm: a window-less job spawn into a fresh buffer —
-          -- no toggle_number until a real open runs __set_options.
-          if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then return end
-          local buf = vim.api.nvim_create_buf(false, true)
-          vim.api.nvim_buf_call(buf, function()
-            vim.fn.termopen('/bin/sh -c "sleep 100000"')
-          end)
-          self.bufnr = buf
+          if not (self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr)) then
+            spawn_buf(self)
+          end
         end,
       }
       all_terms[#all_terms + 1] = term
@@ -379,29 +382,20 @@ elseif scenario == 'panel-smoke' then
   ok()
 
 elseif scenario == 'zoom-no-park' then
-  -- Zoomed C-s keeps the float on real session content the whole way: the
-  -- float window is never swapped to a scratch buffer mid-switch, no park
-  -- scratch is created, and the old session's toggle marker survives the
-  -- churn (stripped only for the open-split scan, then restored).
+  -- Zoomed C-s keeps the float on real session content the whole way: it
+  -- never swaps to a scratch buffer, no split shows a session terminal
+  -- alongside it, no park scratch is created, and the old session's toggle
+  -- marker survives (the marker is only ever stripped inside unzoom's
+  -- rebuild churn, then restored).
   sessions(2)
   M.toggle_zoom()
   local zw = vim.api.nvim_get_current_win()
   local old_buf = vim.api.nvim_win_get_buf(zw)
-  local set_bufs = {}
-  local raw_set_buf = vim.api.nvim_win_set_buf
-  vim.api.nvim_win_set_buf = function(win, buf)
-    set_bufs[#set_bufs + 1] = { win = win, buf = buf }
-    return raw_set_buf(win, buf)
-  end
   M.next_session()
-  vim.api.nvim_win_set_buf = raw_set_buf
-  for _, rec in ipairs(set_bufs) do
-    if rec.win == zw then
-      assert_(vim.bo[rec.buf].buftype == 'terminal'
-          and vim.bo[rec.buf].filetype ~= 'claude-shell',
-        'the float was parked on a scratch buffer mid-switch')
-    end
-  end
+  assert_(vim.api.nvim_win_is_valid(zw), 'the switch killed the zoom float')
+  assert_(is_session_buf(vim.api.nvim_win_get_buf(zw)),
+    'the float was parked on a scratch buffer mid-switch')
+  assert_no_session_splits('mid-switch')
   assert_(vim.b[old_buf].toggle_number ~= nil,
     'the switch left the old session buffer stripped of its toggle marker')
   local scratches = 0
