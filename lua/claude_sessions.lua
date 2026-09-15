@@ -192,11 +192,6 @@ local function find_session(pred)
   end
 end
 
---- The session whose window is currently displayed, if any.
-local function displayed_session()
-  return find_session(function(s) return window_open(s.term) end)
-end
-
 local function session_for_term(term)
   return find_session(function(s) return s.term == term end)
 end
@@ -206,9 +201,10 @@ local function find_session_index(record)
   return select(2, find_session(function(s) return s == record end))
 end
 
--- Forward-declared (defined in the Display section below) so the panel hooks
--- bound above it capture the local, not a nil global.
+-- Forward-declared (defined in the Display/Zoom sections below) so the panel
+-- hooks bound above capture the locals, not nil globals.
 local show_session
+local session_displayed
 
 --- Push a session's display name into its terminal and the statusline var.
 local function apply_name(s, name)
@@ -260,7 +256,7 @@ panel.snapshot = function()
     snap[i] = {
       busy = session_busy(s),
       state = session_state(s),
-      open = window_open(s.term),
+      open = session_displayed(s),
       -- the middle column shows `claude` until the session is renamed
       name = s.custom_name and s.name or nil,
     }
@@ -466,6 +462,13 @@ end
 -- underneath, and the float dies on the second press. A buffer wipe takes the
 -- float with it; other display churn rebuilds it when the zoomed buffer is
 -- still around.
+--
+-- Invariant while zoomed on a SESSION: the float is that session's ONLY
+-- display — no split may also show the buffer. Two windows on one terminal
+-- fight over the pty size and the TUI garbles (a fullscreen float rendering
+-- split-width output), so zoomed switches open no split, and unzoom rebuilds
+-- the session window behind the float before taking it down. (A shell zoom
+-- keeps its split: the shell is plain, a session churn never touches it.)
 
 local zoom_win = nil -- the fullscreen float, valid only while zoomed
 local zoom_buf = nil -- the terminal buffer it shows (session or shell)
@@ -508,12 +511,30 @@ unzoom = function()
   if not zoomed() then return end
   local win = zoom_win
   zoom_win = nil
-  pcall(vim.api.nvim_win_close, win, true)
   local buf = zoom_buf
   zoom_buf = nil
   pcall(vim.keymap.del, 'n', 'q', { buffer = buf })
   local prev = zoom_prev
   zoom_prev = nil
+  -- A session zoom that rode out switches left no session window: the float
+  -- was the only display. Rebuild it BEHIND the float (the window stays up as
+  -- cover — no flash), then take the float down. A shell zoom keeps its own
+  -- split, so the old focus handoff covers it.
+  if buf ~= shell_buf and current and not window_open(current.term) then
+    -- The rebuild's vsplit must run from a REAL window: splitting from the
+    -- float lands the new window full-width BELOW (degenerate layout). The
+    -- zoom-open home is usually it; any real window will do.
+    if prev and U.valid_win(prev) then
+      pcall(vim.api.nvim_set_current_win, prev)
+    else
+      local reals = U.real_windows()
+      if reals[1] then pcall(vim.api.nvim_set_current_win, reals[1]) end
+    end
+    show_session(current)
+    pcall(vim.api.nvim_win_close, win, true)
+    return
+  end
+  pcall(vim.api.nvim_win_close, win, true)
   if prev and U.valid_win(prev) then
     pcall(vim.api.nvim_set_current_win, prev)
   else
@@ -568,8 +589,16 @@ end
 local function zoom_repoint(buf)
   if not U.valid_buf(buf) then return end
   if zoomed() then
+    local old = zoom_buf
     vim.api.nvim_win_set_buf(zoom_win, buf)
     zoom_buf = buf
+    -- The q map rides the zoom: off the buffer it left, onto the one it shows.
+    if old ~= nil and old ~= buf and U.valid_buf(old) then
+      pcall(vim.keymap.del, 'n', 'q', { buffer = old })
+    end
+    vim.keymap.set('n', 'q', function()
+      if zoomed() then unzoom() end
+    end, { buffer = buf, nowait = true, silent = true, desc = 'claude sessions: unzoom' })
     vim.api.nvim_set_current_win(zoom_win)
   else
     zoom_buffer(buf)
@@ -579,9 +608,8 @@ end
 
 --- Rebuild a zoom float whose buffer survived display churn that took the
 --- float's window down; dead buffer → drop the state. A float still up after
---- churn may sit parked on scratch (hide_zoom_for_churn): repoint onto the
---- real buffer — only the session branches repaint, so the shell zoom riding
---- out a switch lands here.
+--- churn whose window shows something else gets repointed onto the real
+--- buffer — the shell zoom riding out a switch lands here.
 local function resync_zoom()
   if zoomed() then
     if U.valid_buf(zoom_buf) and vim.api.nvim_win_get_buf(zoom_win) ~= zoom_buf then
@@ -592,27 +620,6 @@ local function resync_zoom()
   if zoom_win == nil and zoom_buf == nil then return end
   if drop_dead_zoom() then return end
   zoom_buffer(zoom_buf, true)
-end
-
---- Park the zoom float's WINDOW for toggleterm churn: swap a blank scratch
---- buffer into the float, so open_split's find_open_windows sees no terminal
---- window and splits the new session into the right-side column instead of
---- off the float. The float never closes — no flash, no WinClosed, no reopen.
---- Returns the parked buffer (nil when nothing was up).
-local zoom_scratch = nil -- blank buffer parked in the float during churn
-
-local function hide_zoom_for_churn()
-  if not zoomed() then return nil end
-  if not U.valid_buf(zoom_scratch) then
-    zoom_scratch = U.scratch_buffer()
-  end
-  -- The float keeps focus on scratch (no q map: a stray q is plain input,
-  -- never an unzoom). zoom_buf keeps pointing at the parked session buffer —
-  -- the float still "shows" it logically, so drop_dead_zoom/resync_zoom keep
-  -- working, and zoom_win stays valid so zoom_repoint takes the no-flash
-  -- win_set_buf path.
-  pcall(vim.api.nvim_win_set_buf, zoom_win, zoom_scratch)
-  return zoom_buf
 end
 
 --- <C-space>: zoom the displayed session's terminal (or the <C-b> shell when
@@ -639,6 +646,12 @@ function M.toggle_zoom()
     return
   end
   notify('No displayed session to zoom.', vim.log.levels.WARN)
+end
+
+--- Is this session displayed at all — its own window, or (while zoomed on it)
+--- the zoom float, which IS the display and leaves the session window-less?
+session_displayed = function(s)
+  return window_open(s.term) or (zoomed() and zoom_buf == s.term.bufnr)
 end
 
 -- --- Display ----------------------------------------------------------------
@@ -694,22 +707,67 @@ show_session = function(s)
   if window_open(s.term) then
     current = s
     panel.follow()
+    -- While zoomed on a session the float is the display: when it shows a
+    -- DIFFERENT session (a row activation while zoom-open has yet to switch),
+    -- repoint it here and drop the split that showed this one — the buffer
+    -- must not sit in two windows (the pty garbles). A shell zoom stays put.
+    if zoomed() and zoom_buf ~= shell_buf and zoom_buf ~= s.term.bufnr then
+      zoom_repoint(s.term.bufnr)
+      s.term:close()
+    end
     focus_zoom_or(s.term.window)
     return
   end
 
-  -- Park scratch in the zoom float BEFORE the churn: the float stays up the
-  -- whole time — no close/reopen flash, only the fullscreen content swaps
-  -- once. Panel stepping also lands here with scratch parked for a switch
-  -- that may never settle; zoom_repoint below restores either way (every path
-  -- ends on a displayed session).
-  local parked_buf = hide_zoom_for_churn()
-  panel.switching = true -- hold panel_sync's both halves through the window churn
-  without_insert(stepping, function()
+  -- Zoomed on a session: the float IS the display — the session must never
+  -- also sit in a split, or the two windows fight over the terminal's size
+  -- and the TUI garbles (a fullscreen float rendering split-width output).
+  -- So no split is opened here: close the old session's window, point the
+  -- float at the new session; unzoom rebuilds the window.
+  if zoomed() and zoom_buf ~= shell_buf then
+    if not U.valid_buf(s.term.bufnr) then s.term:spawn() end
+    panel.switching = true -- hold panel_sync's both halves through the churn
     close_all_open_windows(s.term)
-    s.term:open()
+    panel.switching = false
+    current = s
+    panel.open()
+    diff.open()
+    zoom_repoint(s.term.bufnr)
+    if stepping then return end
+    panel.follow()
+    focus_zoom_or(s.term.window)
+    return
+  end
+
+  -- The float keeps its real buffer through the churn — parking a blank in
+  -- it (the old trick for the scan below) painted a fullscreen blank frame
+  -- on every mid-churn redraw. Instead the shown buffer's toggle marker is
+  -- stripped for the churn: toggleterm's open-split scan counts any buffer
+  -- with `toggle_number` as an open terminal and would split the new session
+  -- off the float (degenerate geometry: it focuses the float and splits IT).
+  -- The scan runs by float WINDOW, not zoom state — unzoom's rebuild gets
+  -- here with the state already down and the float still up as cover.
+  -- Restore is guarded so an error cannot leak it.
+  local shown_buf
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local ok, cfg = pcall(vim.api.nvim_win_get_config, w)
+    if ok and cfg and cfg.relative ~= '' then
+      local b = vim.api.nvim_win_get_buf(w)
+      if vim.b[b].toggle_number then shown_buf = b end
+    end
+  end
+  local shown_toggle_number = shown_buf and vim.b[shown_buf].toggle_number or nil
+  if shown_toggle_number then vim.b[shown_buf].toggle_number = nil end
+  panel.switching = true -- hold panel_sync's both halves through the window churn
+  local ok_churn, churn_err = pcall(function()
+    without_insert(stepping, function()
+      close_all_open_windows(s.term)
+      s.term:open()
+    end)
   end)
+  if shown_toggle_number then vim.b[shown_buf].toggle_number = shown_toggle_number end
   panel.switching = false
+  if not ok_churn then error(churn_err, 0) end
   current = s
   U.plain_terminal_window(s.term.window) -- terminals draw their own cursor
   panel.open() -- refresh rows (open/closed states flipped)
@@ -717,10 +775,10 @@ show_session = function(s)
   sync_shell() -- the shell split re-anchors below the new session window
 
   -- The display moved: a session zoom follows it fullscreen (a shell zoom
-  -- stays on the shell); a float churn took down rebuilds while its buffer
-  -- lives.
+  -- stays on the shell, already in place); a float churn took down rebuilds
+  -- while its buffer lives.
   if zoom_buf ~= shell_buf then
-    if parked_buf or (zoom_buf and U.valid_buf(zoom_buf)) then
+    if zoom_buf and U.valid_buf(zoom_buf) then
       zoom_repoint(s.term.bufnr)
     else
       drop_dead_zoom()
@@ -845,10 +903,10 @@ function M.close_current(target, close_opts)
 
   -- The window survived the wipe: keep the same split and swap the
   -- successor's buffer in (a single clean statusline update, no flicker).
-  -- Unlike show_session/next_session, no park here — the buffer is ALREADY
-  -- wiped, so the zoom float is already gone and zoom_win dangles invalid;
-  -- zoom_buf's dead pointer is exactly what keep_zoom below needs, and `win`
-  -- only survives when some OTHER window was showing a live session.
+  -- No zoom handling up front — the buffer is ALREADY wiped, so a float
+  -- showing it is already gone and zoom_win dangles invalid; zoom_buf's dead
+  -- pointer is exactly what keep_zoom below needs, and `win` only survives
+  -- when some OTHER window was showing a live session.
   if U.valid_win(win) then
     close_all_open_windows(next_session.term)
     vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
@@ -860,8 +918,13 @@ function M.close_current(target, close_opts)
     panel.open()
     diff.refresh()
     if keep_zoom then
-      -- Reopen on the successor from the kept cursor home.
+      -- Reopen on the successor from the kept cursor home — then the float is
+      -- the successor's ONLY display: the split it inherited would fight the
+      -- float over the terminal's size and garble the TUI. Take the split
+      -- down behind the float; unzoom rebuilds it.
       zoom_buffer(next_session.term.bufnr, true)
+      next_session.term.window = nil
+      pcall(vim.api.nvim_win_close, win, true)
     elseif zoom_buf ~= shell_buf and zoom_buf and U.valid_buf(zoom_buf) then
       -- A live zoom on some OTHER buffer: rebuild it — close_all_open_windows
       -- above may have taken its window down.
@@ -879,12 +942,16 @@ function M.close_current(target, close_opts)
 
   -- The window went away with its buffer (the common case when zoomed: the
   -- wipe closes BOTH split and float). The successor opens through the normal
-  -- path, which repoints a parked/live session zoom onto it — a parked
-  -- keep_zoom just re-arms its intent (zoom_buf → successor; the stale
-  -- zoom_win must go, or zoom_repoint would win_set_buf on a dead id).
+  -- path, which repoints a live session zoom onto it — a keep_zoom whose
+  -- float died with the wipe re-arms its intent (zoom_buf → successor; the
+  -- stale zoom_win must go, or zoom_repoint would win_set_buf on a dead id).
   if keep_zoom then
+    -- The zoomed session was closed and the wipe took the float with it.
+    -- Re-arm the float on the successor BEFORE showing it: show_session's
+    -- zoomed branch then keeps the successor float-only (a split would fight
+    -- the float over the terminal's size and garble the TUI).
     zoom_win = nil
-    zoom_buf = next_session.term.bufnr
+    zoom_buffer(next_session.term.bufnr, true)
   end
   if not stepping then
     show_session(next_session)
@@ -909,7 +976,7 @@ end
 --- terminals: opening a terminal closes a visible session window first, and
 --- opening a session closes open terminals.
 function M.is_visible()
-  return displayed_session() ~= nil
+  return find_session(session_displayed) ~= nil
 end
 
 --- Close the displayed session window(s) without killing processes; the
@@ -981,26 +1048,28 @@ function M.next_session()
   -- Target: the session after the displayed one (wrapping), or the last
   -- closed, else the most recent. last_closed is only ever set to live
   -- records (drop_record clears it) — no liveness check needed.
-  local displayed, displayed_index = displayed_session()
+  local displayed, displayed_index = find_session(session_displayed)
   local target = displayed and sessions[displayed_index % #sessions + 1]
     or last_closed
     or sessions[#sessions]
 
   if window_open(target.term) then
-    -- Hide the zoom float first (it would count as an open terminal window —
-    -- see hide_zoom_for_churn), close any other open toggleterm window, then
-    -- focus the target: a session zoom repoints onto it, a shell zoom
-    -- rebuilds while its buffer lives.
-    local was_zoomed = hide_zoom_for_churn()
+    -- Close any other open toggleterm window, then focus the target: a
+    -- session zoom repoints onto it, a shell zoom stays put (the churn never
+    -- touches the float).
     close_all_open_windows(target.term)
     current = target
     panel.follow()
     if zoom_buf ~= shell_buf then
-      if was_zoomed or (zoom_buf and U.valid_buf(zoom_buf)) then
+      if zoom_buf and U.valid_buf(zoom_buf) then
         zoom_repoint(target.term.bufnr)
       else
         drop_dead_zoom()
       end
+      -- Zoomed on a session, the float is now the display: the split that
+      -- showed the target must go — one buffer, one window, or the pty
+      -- garbles (the fullscreen float rendering split-width output).
+      if zoomed() and window_open(target.term) then target.term:close() end
     else
       resync_zoom()
     end
@@ -1024,7 +1093,7 @@ function M.statusline_indicator()
     if session_busy(s) and not blink_on then
       parts[#parts + 1] = ' ' -- disappear (same width as •/◦)
     else
-      parts[#parts + 1] = window_open(s.term) and '•' or '◦'
+      parts[#parts + 1] = session_displayed(s) and '•' or '◦'
     end
   end
   return table.concat(parts, ' ')

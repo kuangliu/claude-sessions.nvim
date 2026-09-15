@@ -49,6 +49,7 @@ package.loaded['toggleterm.terminal'] = {
             vim.api.nvim_win_set_buf(win, buf)
             vim.fn.termopen('/bin/sh -c "sleep 100000"')
             self.bufnr = buf
+            vim.b[buf].toggle_number = #all_terms + 1 -- real toggleterm: set on open
           else
             vim.api.nvim_win_set_buf(win, self.bufnr)
           end
@@ -64,6 +65,16 @@ package.loaded['toggleterm.terminal'] = {
           if self.window and vim.api.nvim_win_is_valid(self.window) then
             vim.api.nvim_set_current_win(self.window)
           end
+        end,
+        spawn = function(self)
+          -- Real toggleterm: a window-less job spawn into a fresh buffer —
+          -- no toggle_number until a real open runs __set_options.
+          if self.bufnr and vim.api.nvim_buf_is_valid(self.bufnr) then return end
+          local buf = vim.api.nvim_create_buf(false, true)
+          vim.api.nvim_buf_call(buf, function()
+            vim.fn.termopen('/bin/sh -c "sleep 100000"')
+          end)
+          self.bufnr = buf
         end,
       }
       all_terms[#all_terms + 1] = term
@@ -119,11 +130,25 @@ local function is_session_buf(buf)
     and vim.bo[buf].filetype ~= 'claude-shell'
 end
 
+-- The single-window zoom invariant: no real (non-float) window may show a
+-- session terminal while the float is up — two windows on one terminal fight
+-- over the pty and the TUI garbles.
+local function assert_no_session_splits(tag)
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local ok, cfg = pcall(vim.api.nvim_win_get_config, w)
+    if ok and cfg and cfg.relative == '' then
+      assert_(not is_session_buf(vim.api.nvim_win_get_buf(w)),
+        (tag .. ': a split shows a session terminal alongside the float'))
+    end
+  end
+end
+
 -- --- Scenarios -----------------------------------------------------------
 
 if scenario == 'zoom-cycle' then
   -- Session zoom survives repeated C-s on both switch legs; the float keeps
-  -- focus and always shows a session terminal.
+  -- focus, always shows a session terminal, and no split shows a session
+  -- terminal alongside it (the single-window invariant).
   sessions(3)
   M.toggle_zoom()
   local zw = vim.api.nvim_get_current_win()
@@ -132,7 +157,41 @@ if scenario == 'zoom-cycle' then
     local b = vim.api.nvim_win_get_buf(zw)
     assert_(is_session_buf(b), ('leg %d: float not on a session terminal'):format(i))
     assert_(vim.api.nvim_get_current_win() == zw, ('leg %d: float lost focus'):format(i))
+    assert_no_session_splits(('leg %d'):format(i))
   end
+  ok()
+
+elseif scenario == 'zoom-rebuild' then
+  -- Zoomed switches leave the session window-less (the float IS the display);
+  -- unzoom then rebuilds the window behind the float and lands on it with no
+  -- float left up.
+  sessions(3)
+  M.toggle_zoom()
+  M.next_session()
+  M.next_session()
+  assert_no_session_splits('mid-zoom')
+  M.toggle_zoom()
+  assert_(float_win() == nil, 'unzoom left the float up')
+  assert_(is_session_buf(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())),
+    'unzoom did not land on the rebuilt session window')
+  ok()
+
+elseif scenario == 'zoom-create' then
+  -- <C-a> while zoomed: the new session is spawned window-less and the float
+  -- repoints onto it, focus held; unzoom rebuilds ITS window.
+  sessions(1)
+  M.toggle_zoom()
+  local zw = vim.api.nvim_get_current_win()
+  M.create()
+  assert_(vim.api.nvim_win_is_valid(zw), 'create while zoomed killed the float')
+  assert_(is_session_buf(vim.api.nvim_win_get_buf(zw)),
+    'float not on the new session terminal after create')
+  assert_(vim.api.nvim_get_current_win() == zw, 'create stole focus from the float')
+  assert_no_session_splits('after create')
+  M.toggle_zoom()
+  assert_(float_win() == nil, 'unzoom after create left the float up')
+  assert_(is_session_buf(vim.api.nvim_win_get_buf(vim.api.nvim_get_current_win())),
+    'unzoom after create did not land on the new session window')
   ok()
 
 elseif scenario == 'shell-zoom-cycle' then
@@ -319,23 +378,40 @@ elseif scenario == 'panel-smoke' then
   assert_(vim.fn.maparg('j', 'n', false, panel_b) ~= '', 'panel j map missing')
   ok()
 
-elseif scenario == 'scratch-opts' then
-  -- The parked zoom scratch is exactly one hidden nofile buffer with the
-  -- scratch option set.
-  sessions(3)
+elseif scenario == 'zoom-no-park' then
+  -- Zoomed C-s keeps the float on real session content the whole way: the
+  -- float window is never swapped to a scratch buffer mid-switch, no park
+  -- scratch is created, and the old session's toggle marker survives the
+  -- churn (stripped only for the open-split scan, then restored).
+  sessions(2)
   M.toggle_zoom()
+  local zw = vim.api.nvim_get_current_win()
+  local old_buf = vim.api.nvim_win_get_buf(zw)
+  local set_bufs = {}
+  local raw_set_buf = vim.api.nvim_win_set_buf
+  vim.api.nvim_win_set_buf = function(win, buf)
+    set_bufs[#set_bufs + 1] = { win = win, buf = buf }
+    return raw_set_buf(win, buf)
+  end
   M.next_session()
-  local scratches = {}
+  vim.api.nvim_win_set_buf = raw_set_buf
+  for _, rec in ipairs(set_bufs) do
+    if rec.win == zw then
+      assert_(vim.bo[rec.buf].buftype == 'terminal'
+          and vim.bo[rec.buf].filetype ~= 'claude-shell',
+        'the float was parked on a scratch buffer mid-switch')
+    end
+  end
+  assert_(vim.b[old_buf].toggle_number ~= nil,
+    'the switch left the old session buffer stripped of its toggle marker')
+  local scratches = 0
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b) == ''
         and vim.bo[b].buftype == 'nofile' then
-      scratches[#scratches + 1] = b
+      scratches = scratches + 1
     end
   end
-  assert_eq(#scratches, 1, 'parked scratch buffer count')
-  local b = scratches[1]
-  assert_eq(vim.bo[b].buflisted, false, 'scratch buflisted')
-  assert_eq(vim.bo[b].swapfile, false, 'scratch swapfile')
+  assert_eq(scratches, 0, 'the switch created a park scratch buffer')
   ok()
 
 else
