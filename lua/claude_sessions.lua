@@ -173,7 +173,7 @@ end
 --- stops the timer again.
 local function start_poll_timer()
   if poll_timer then return end
-  poll_timer = (vim.uv or vim.loop).new_timer()
+  poll_timer = U.uv.new_timer()
   poll_timer:start(POLL_INTERVAL_MS, POLL_INTERVAL_MS, vim.schedule_wrap(poll_tick))
 end
 
@@ -198,7 +198,9 @@ end
 
 --- Index of `record` in the sessions list, or nil.
 local function find_session_index(record)
-  return select(2, find_session(function(s) return s == record end))
+  for i, s in ipairs(sessions) do
+    if s == record then return i end
+  end
 end
 
 -- Forward-declared (defined in the Display/Zoom sections below) so the panel
@@ -624,10 +626,10 @@ local function zoom_repoint(buf)
       map_zoom_q(buf)
     end
     vim.api.nvim_set_current_win(zoom_win)
+    vim.cmd('startinsert')
   else
-    zoom_buffer(buf)
+    zoom_buffer(buf) -- first zoom: opens the float, ends with startinsert
   end
-  vim.cmd('startinsert')
 end
 
 --- Rebuild a zoom float whose buffer survived display churn that took the
@@ -869,6 +871,47 @@ function M.create()
   end)
 end
 
+--- The closed session's window survived the wipe: keep the same split and
+--- swap the successor's buffer in (a single clean statusline update, no
+--- flicker), settle the zoom state, and — unless stepping — focus the
+--- successor.
+local function swap_in_successor(win, next_session, keep_zoom, stepping)
+  close_all_open_windows(next_session.term)
+  vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
+  next_session.term.window = win
+  current = next_session
+  -- Apply the successor's highlights; re-strip the cursorline/column.
+  require('toggleterm.ui').hl_term(next_session.term)
+  U.plain_terminal_window(win)
+  panel.open()
+  diff.refresh()
+  -- No zoom handling before this point — the closed buffer is ALREADY wiped,
+  -- so a float showing it is already gone and zoom_win dangles invalid;
+  -- zoom_buf's dead pointer is exactly what keep_zoom needs, and `win` only
+  -- survives when some OTHER window was showing a live session.
+  if keep_zoom then
+    -- Reopen on the successor from the kept cursor home — then the float is
+    -- the successor's ONLY display: the split it inherited would fight the
+    -- float over the terminal's size and garble the TUI. Hand-close it
+    -- behind the float (term:close() would run toggleterm's origin-window
+    -- focus restore, off the float); unzoom rebuilds it.
+    zoom_buffer(next_session.term.bufnr, true)
+    next_session.term.window = nil
+    pcall(vim.api.nvim_win_close, win, true)
+  elseif zoom_on_session() and U.valid_buf(zoom_buf) then
+    -- A live zoom on some OTHER buffer: rebuild it — close_all_open_windows
+    -- above may have taken its window down.
+    resync_zoom()
+  else
+    drop_dead_zoom()
+  end
+  if not stepping then
+    focus_zoom_or(win)
+    vim.cmd('startinsert')
+    panel.follow()
+  end
+end
+
 --- Close a session (window + process) and drop it; the split stays occupied
 --- — the successor is shown in its place. `stepping` keeps focus on the panel;
 --- closing a background session leaves the display alone.
@@ -908,46 +951,9 @@ function M.close_current(target, close_opts)
     return
   end
   local next_session = sessions[index] or sessions[#sessions]
-  -- The closed session's zoom follows it onto the successor fullscreen
-  -- (`keep_zoom` was captured before the wipe above).)
 
-  -- The window survived the wipe: keep the same split and swap the
-  -- successor's buffer in (a single clean statusline update, no flicker).
-  -- No zoom handling up front — the buffer is ALREADY wiped, so a float
-  -- showing it is already gone and zoom_win dangles invalid; zoom_buf's dead
-  -- pointer is exactly what keep_zoom below needs, and `win` only survives
-  -- when some OTHER window was showing a live session.
   if U.valid_win(win) then
-    close_all_open_windows(next_session.term)
-    vim.api.nvim_win_set_buf(win, next_session.term.bufnr)
-    next_session.term.window = win
-    current = next_session
-    -- Apply the successor's highlights; re-strip the cursorline/column.
-    require('toggleterm.ui').hl_term(next_session.term)
-    U.plain_terminal_window(win) -- and re-strip the cursorline/cursorcolumn
-    panel.open()
-    diff.refresh()
-    if keep_zoom then
-      -- Reopen on the successor from the kept cursor home — then the float is
-      -- the successor's ONLY display: the split it inherited would fight the
-      -- float over the terminal's size and garble the TUI. Hand-close it
-      -- behind the float (term:close() would run toggleterm's origin-window
-      -- focus restore, off the float); unzoom rebuilds it.
-      zoom_buffer(next_session.term.bufnr, true)
-      next_session.term.window = nil
-      pcall(vim.api.nvim_win_close, win, true)
-    elseif zoom_on_session() and U.valid_buf(zoom_buf) then
-      -- A live zoom on some OTHER buffer: rebuild it — close_all_open_windows
-      -- above may have taken its window down.
-      resync_zoom()
-    else
-      drop_dead_zoom()
-    end
-    if not stepping then
-      focus_zoom_or(win)
-      vim.cmd('startinsert')
-      panel.follow()
-    end
+    swap_in_successor(win, next_session, keep_zoom, stepping)
     return
   end
 

@@ -198,6 +198,19 @@ local function edit_target()
   }
 end
 
+--- The edit target when the cursor is ON the pane's buffer; nil (with the
+--- shared notice) otherwise. The guard d/u/D share — `no_binary` extends it
+--- to binary views, which only `d` refuses to edit.
+local function pane_target(no_binary)
+  local buf = vim.api.nvim_get_current_buf()
+  local t = edit_target()
+  if t and buf == M.buf and not (no_binary and vim.b[buf].diffview_binary) then
+    return t
+  end
+  U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
+  return nil
+end
+
 -- Join edited lines back into file content, re-appending the newline a file
 -- with a trailing newline owns.
 local function join_lines(ls, want_newline)
@@ -303,12 +316,9 @@ end
 --- file, removed restored into it. Each edit pushes before/after content
 --- snapshots onto the undo stack for `u`.
 function M.revert_line()
-  local buf = vim.api.nvim_get_current_buf()
-  local t = edit_target()
-  if not (t and buf == M.buf) or vim.b[buf].diffview_binary then
-    U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
-    return
-  end
+  local t = pane_target(true)
+  if not t then return end
+  local buf = vim.api.nvim_get_current_buf() -- the guard pinned it to M.buf
   local rows = vim.b[buf].diffview_rows
   local idx = cursor_row(buf)
   local r = rows and idx and rows[idx]
@@ -349,12 +359,8 @@ end
 --- (a stale entry, file moved under the stack, is dropped). The cursor
 --- returns to the row the d touched.
 function M.undo_revert()
-  local buf = vim.api.nvim_get_current_buf()
-  local t = edit_target()
-  if not (t and buf == M.buf) then
-    U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
-    return
-  end
+  local t = pane_target()
+  if not t then return end
   local entry = undo_stack[#undo_stack]
   if not entry then
     U.notify('diff pane: nothing to undo', vim.log.levels.INFO)
@@ -394,12 +400,8 @@ end
 --- machinery (classify first: the pane has no row record). The discard
 --- prompts its y/N.
 function M.revert_file()
-  local buf = vim.api.nvim_get_current_buf()
-  local t = edit_target()
-  if not (t and buf == M.buf) then
-    U.notify('diff pane: cannot revert this view', vim.log.levels.WARN)
-    return
-  end
+  local t = pane_target()
+  if not t then return end
   M.discard_path(t.root, t.rel, M.reprobe)
 end
 

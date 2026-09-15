@@ -122,10 +122,6 @@ local function state_style(s)
   return STATE_STYLE[s.state or (s.busy and 'busy' or 'idle')] or STATE_STYLE.idle
 end
 
-local function row_state(s, pin_row, i)
-  return state_style(s), pin_row == i or (not pin_row and s.open)
-end
-
 -- Spinner: the WORKING symbol rotates one braille frame per SPIN_MS while
 -- the panel is open and a spinning state is on the list (an idle panel pays
 -- nothing). The tick itself stops the timer when nothing spins anymore.
@@ -136,7 +132,7 @@ local spin_timer ---@type uv.uv_timer_t?
 
 local function start_spinner()
   if spin_timer then return end
-  spin_timer = (vim.uv or vim.loop).new_timer()
+  spin_timer = U.uv.new_timer()
   spin_timer:start(SPIN_MS, SPIN_MS, vim.schedule_wrap(function()
     if not active() then
       cancel_timer(spin_timer)
@@ -170,7 +166,9 @@ local function render(buf, snap, pin_row)
   local width = active() and vim.api.nvim_win_get_width(M.win) or 80
   local views = {}
   for i, s in ipairs(snap) do
-    local style, marked = row_state(s, pin_row, i)
+    local style = state_style(s)
+    -- The ᐅ marks the pinned row mid-step; else the displayed session.
+    local marked = pin_row == i or (not pin_row and s.open)
     local sym = style.sym or SPIN_FRAMES[spin_phase] -- nil sym = spinner frame
     any_spinning = any_spinning or style.spin
     views[i] = {
@@ -544,8 +542,7 @@ local function install_mode_guard()
   vim.api.nvim_create_autocmd('User', {
     pattern = 'ClaudeSessionsTick',
     callback = function()
-      if not stray_insert(0) then return end
-      if vim.fn.mode():find('^[it]') then vim.cmd('stopinsert') end
+      if stray_insert(0) then leave_insert() end
     end,
   })
 end

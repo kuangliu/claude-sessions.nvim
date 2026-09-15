@@ -359,7 +359,7 @@ function M.discard_file(root, spec, done)
   if not answer:lower():find('^y') then return end
 
   if spec.untracked then
-    local ok = (vim.uv or vim.loop).fs_unlink(root .. '/' .. spec.path)
+    local ok = U.uv.fs_unlink(root .. '/' .. spec.path)
     if not ok then
       U.notify('Could not delete ' .. spec.path, vim.log.levels.ERROR)
       return
@@ -574,7 +574,7 @@ function M.open()
     return -- up, or a split in flight: the poll loop / refresh owns the rows
   end
   opening = true
-  local cwd = (vim.uv or vim.loop).cwd()
+  local cwd = U.uv.cwd()
   if cached_cwd == cwd then
     open_probe(cached_root)
     return

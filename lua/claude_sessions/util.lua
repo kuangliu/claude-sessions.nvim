@@ -5,6 +5,10 @@
 
 local U = {}
 
+-- The event loop, old-name compatible: one spelling for every timer/cwd/fs
+-- call in the plugin.
+U.uv = vim.uv or vim.loop
+
 function U.valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
