@@ -9,6 +9,10 @@ local U = {}
 -- call in the plugin.
 U.uv = vim.uv or vim.loop
 
+-- The name a session shows until it is renamed — one home for the literal the
+-- registry and the panel both fall back to.
+U.DEFAULT_NAME = 'claude'
+
 function U.valid_win(win)
   return win ~= nil and vim.api.nvim_win_is_valid(win)
 end
@@ -61,6 +65,18 @@ function U.apply_winopts(win, opts)
   end
 end
 
+--- Split a window `height` rows tall directly below `anchor` and show `buf` in
+--- it, then `style` that window. `below` splits the CURRENT window's row, so
+--- the current window moves to the anchor first. Returns the new window.
+function U.split_below(anchor, height, buf, style)
+  vim.api.nvim_set_current_win(anchor)
+  vim.cmd('below ' .. height .. 'split')
+  local win = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(win, buf)
+  if style then style(win) end
+  return win
+end
+
 --- `msg` under the 'claude sessions' title, at `level` (INFO when none).
 function U.notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })
@@ -111,14 +127,11 @@ function U.pad_to(s, width)
 end
 
 --- A hidden scratch buffer to render into. `filetype` optional (each panel
---- tags its own).
+--- tags its own). nvim_create_buf's scratch flag already gives buftype
+--- 'nofile', bufhidden 'hide', buflisted false and swapfile false.
 function U.scratch_buffer(filetype)
   local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype = 'nofile'
   if filetype then vim.bo[buf].filetype = filetype end
-  vim.bo[buf].bufhidden = 'hide'
-  vim.bo[buf].buflisted = false
-  vim.bo[buf].swapfile = false
   vim.b[buf].completion = false -- no completion popups on panel text
   return buf
 end

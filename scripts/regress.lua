@@ -27,6 +27,7 @@ vim.fn.mkdir(tmp, 'p')
 vim.fn.chdir(tmp)
 
 local M = require('claude_sessions')
+local U = require('claude_sessions.util')
 M.setup({})
 
 -- toggleterm stub: enough Terminal surface for the plugin's display
@@ -119,8 +120,8 @@ local function assert_(cond, what)
 end
 
 local function float_win()
-  local cfg = vim.api.nvim_win_get_config(vim.api.nvim_get_current_win())
-  return cfg.relative ~= '' and vim.api.nvim_get_current_win() or nil
+  local win = vim.api.nvim_get_current_win()
+  return vim.api.nvim_win_get_config(win).relative ~= '' and win or nil
 end
 
 local function sessions(n)
@@ -133,16 +134,24 @@ local function is_session_buf(buf)
     and vim.bo[buf].filetype ~= 'claude-shell'
 end
 
+-- The buffers of filetype `ft` shown in this tab's windows.
+local function bufs_with_ft(ft)
+  local out = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.bo[b].filetype == ft then out[#out + 1] = b end
+  end
+  return out
+end
+
 -- The single-window zoom invariant: no real (non-float) window may show a
 -- session terminal while the float is up — two windows on one terminal fight
--- over the pty and the TUI garbles.
+-- over the pty and the TUI garbles. Reads the plugin's own notion of a real
+-- window, so the assertion cannot drift from what the plugin lays out.
 local function assert_no_session_splits(tag)
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local ok, cfg = pcall(vim.api.nvim_win_get_config, w)
-    if ok and cfg and cfg.relative == '' then
-      assert_(not is_session_buf(vim.api.nvim_win_get_buf(w)),
-        (tag .. ': a split shows a session terminal alongside the float'))
-    end
+  for _, w in ipairs(U.real_windows()) do
+    assert_(not is_session_buf(vim.api.nvim_win_get_buf(w)),
+      (tag .. ': a split shows a session terminal alongside the float'))
   end
 end
 
@@ -268,19 +277,11 @@ elseif scenario == 'shell-toggle' then
   -- C-b open/close/re-open cycles ONE shell; sessions survive the toggles.
   sessions(2)
   M.toggle_shell()
-  local first = {}
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].filetype == 'claude-shell' then first[#first + 1] = b end
-  end
+  local first = bufs_with_ft('claude-shell')
   assert_eq(#first, 1, 'shell window count after open')
   M.toggle_shell() -- close from inside the shell
   M.toggle_shell() -- the SAME shell buffer comes back
-  local second = {}
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].filetype == 'claude-shell' then second[#second + 1] = b end
-  end
+  local second = bufs_with_ft('claude-shell')
   assert_eq(#second, 1, 'shell window count after re-open')
   assert_eq(second[1], first[1], 're-open spawned a new shell instead of reusing')
   M.toggle_shell()
@@ -303,29 +304,11 @@ elseif scenario == 'shell-zoom-lifecycle' then
     'claude-shell', 'float not on the shell before C-b')
   M.toggle_shell() -- zoomed: only takes the float down
   assert_(float_win() == nil, 'C-b while zoomed left the float up')
-  local shells = 0
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == 'claude-shell' then
-      shells = shells + 1
-    end
-  end
-  assert_eq(shells, 1, 'C-b while zoomed disturbed the shell split')
+  assert_eq(#bufs_with_ft('claude-shell'), 1, 'C-b while zoomed disturbed the shell split')
   M.toggle_shell() -- cursor inside the shell: closes it
-  shells = 0
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == 'claude-shell' then
-      shells = shells + 1
-    end
-  end
-  assert_eq(shells, 0, 'second C-b did not close the shell')
+  assert_eq(#bufs_with_ft('claude-shell'), 0, 'second C-b did not close the shell')
   M.toggle_shell() -- re-opens the SAME shell
-  shells = 0
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == 'claude-shell' then
-      shells = shells + 1
-    end
-  end
-  assert_eq(shells, 1, 'third C-b did not re-open the shell')
+  assert_eq(#bufs_with_ft('claude-shell'), 1, 'third C-b did not re-open the shell')
   assert_(M.has_sessions(), 'sessions lost to the shell lifecycle')
   ok()
 
@@ -355,10 +338,7 @@ elseif scenario == 'zoomed-cb' then
   M.toggle_zoom()
   M.toggle_shell()
   assert_(float_win() == nil, 'C-b while zoomed left the float up')
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    assert_(vim.bo[vim.api.nvim_win_get_buf(w)].filetype ~= 'claude-shell',
-      'C-b while zoomed opened a shell window')
-  end
+  assert_eq(#bufs_with_ft('claude-shell'), 0, 'C-b while zoomed opened a shell window')
   ok()
 
 elseif scenario == 'panel-smoke' then
@@ -368,14 +348,9 @@ elseif scenario == 'panel-smoke' then
   vim.api.nvim_win_set_buf(0, tree_buf)
   vim.bo[tree_buf].filetype = 'NvimTree'
   sessions(2)
-  local panel_w, panel_b
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].filetype == 'claude-sessions-panel' then
-      panel_w, panel_b = w, b
-    end
-  end
+  local panel_w = U.window_with_filetype('claude-sessions-panel')
   assert_(panel_w, 'no session panel window')
+  local panel_b = vim.api.nvim_win_get_buf(panel_w)
   assert_eq(vim.api.nvim_buf_line_count(panel_b), 6, 'panel line count (2 entries x 3)')
   assert_(vim.fn.maparg('q', 'n', false, panel_b) ~= '', 'panel q map missing')
   assert_(vim.fn.maparg('j', 'n', false, panel_b) ~= '', 'panel j map missing')

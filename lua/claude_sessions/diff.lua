@@ -104,6 +104,16 @@ local function git(root, args, cb)
   U.job(vim.list_extend({ 'git', '-C', root }, args), cb)
 end
 
+--- A job's stdout as lines, or nil when it failed.
+local function split_lines(out)
+  return out and vim.split(out, '\n', { trimempty = true }) or nil
+end
+
+--- The basename of a repo-relative path (the panel's row label).
+local function basename(path)
+  return path:match('[^/]+$') or path
+end
+
 --- The changes `git diff --numstat HEAD` reports: one { path, add, del } per
 --- row. Renames arrive mangled ('old => new'); the old name rides along as
 --- `renamed_from` — the discard needs it, or restoring only the new name
@@ -111,7 +121,7 @@ end
 local function fetch_numstat(root, cb)
   git(root, { 'diff', '--numstat', 'HEAD' }, function(out)
     local files = {}
-    for _, row in ipairs(out and vim.split(out, '\n', { trimempty = true }) or {}) do
+    for _, row in ipairs(split_lines(out) or {}) do
       local add, del, path = row:match('^(%d+)%s+(%d+)%s+(.+)$')
       local renamed_from
       if path and path:match('=>') then
@@ -130,10 +140,12 @@ end
 
 --- All porcelain status rows of `root`, one string per line, or nil on
 --- failure. Shared by open()'s clean-workspace probe and refresh()'s
---- untracked probe.
-local function fetch_status(root, cb)
-  git(root, { 'status', '--porcelain', '--untracked-files=all' }, function(out)
-    cb(out and vim.split(out, '\n', { trimempty = true }) or nil)
+--- untracked probe. `untracked` is git's own mode: the probe only asks "is
+--- anything dirty", so 'normal' (which short-circuits at the directory level)
+--- is enough there, while the row fetch needs 'all'.
+local function fetch_status(root, cb, untracked)
+  git(root, { 'status', '--porcelain', '--untracked-files=' .. (untracked or 'all') }, function(out)
+    cb(split_lines(out))
   end)
 end
 
@@ -171,7 +183,7 @@ local function render(files)
     local counts_lnum = name_lnum + 1
     -- First row: the file's NAME only (the basename), indented like the
     -- counts below it. Default text color; no extmark.
-    local name = f.path:match('[^/]+$') or f.path
+    local name = basename(f.path)
     lines[#lines + 1] = ' ' .. RENDER_INDENT .. name
     -- Second row: the counts and the bar, indented under the name.
     local add_str = ('+%d'):format(f.add or 0)
@@ -370,7 +382,7 @@ function M.discard_file(root, spec, done)
   -- Not in HEAD (a staged new file): checkout has nothing to take, the rm IS
   -- the reset. A failed checkout reports and still settles — the rows
   -- re-probe show whatever actually happened.
-  local name = spec.path:match('[^/]+$') or spec.path
+  local name = basename(spec.path)
   local function reset_new_side()
     git(root, { 'rm', '-f', '--', spec.path }, function(out)
       if out == nil then
@@ -520,12 +532,8 @@ local function open_split(root, tw)
   local prev_focus = vim.api.nvim_get_current_win()
   -- `below` the tree: the split lands directly below it, in every (re)open
   -- order.
-  vim.api.nvim_set_current_win(tw)
-  vim.cmd('below ' .. height .. 'split')
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(win, buf)
+  local win = U.split_below(tw, height, buf, U.plain_text_window)
   vim.wo[win].winfixheight = true -- the tree's options and layout churn must not resize it
-  U.plain_text_window(win)
   -- The window can go away mid-race — focus the tree then.
   U.focus(prev_focus, tw)
   -- One calibration for the whole stack: tree, this panel, session list.
@@ -560,7 +568,7 @@ local function open_probe(root)
       return
     end
     open_split(root, tw)
-  end)
+  end, 'normal')
 end
 
 --- (Re)open the panel below the tree window. No-op without a tree, a git

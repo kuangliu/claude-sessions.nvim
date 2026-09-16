@@ -18,16 +18,13 @@ local M = {}
 
 local U = require('claude_sessions.util')
 
--- Bound by the main module: snapshot() → { busy, state, open, name }[] (index
--- == session number), show(i), close_session(i), rename_session(i, name).
+-- Bound by the main module: snapshot() → { state, open, name }[] (index ==
+-- session number), show(i, keep_focus), close_session(i), rename_session(i, name).
+-- keep_focus keeps the panel cursor where it is through the switch (stepping).
 M.snapshot = nil
 M.show = nil
 M.close_session = nil
 M.rename_session = nil
-
--- True while the panel drives a switch (stepping): show_session then skips
--- its focus juggling so the cursor stays on the panel.
-M.stepping = false
 
 -- Panel window and buffer, nil when closed. Validity re-checked on every use
 -- — the window can also go away through user layout edits.
@@ -87,9 +84,9 @@ local function snapshot()
 end
 
 local function cancel_timer(timer)
-  if not timer then return end
-  pcall(function() timer:stop() end)
-  pcall(function() timer:close() end)
+  if not timer or timer:is_closing() then return end
+  timer:stop()
+  timer:close()
 end
 
 local function leave_insert()
@@ -119,7 +116,7 @@ local STATE_STYLE = {
 }
 
 local function state_style(s)
-  return STATE_STYLE[s.state or (s.busy and 'busy' or 'idle')] or STATE_STYLE.idle
+  return STATE_STYLE[s.state] or STATE_STYLE.idle
 end
 
 -- Spinner: the WORKING symbol rotates one braille frame per SPIN_MS while
@@ -164,40 +161,33 @@ local function render(buf, snap, pin_row)
   local marks = {}
   local any_spinning = false
   local width = active() and vim.api.nvim_win_get_width(M.win) or 80
-  local views = {}
   for i, s in ipairs(snap) do
     local style = state_style(s)
     -- The ᐅ marks the pinned row mid-step; else the displayed session.
     local marked = pin_row == i or (not pin_row and s.open)
     local sym = style.sym or SPIN_FRAMES[spin_phase] -- nil sym = spinner frame
+    local gutter = marked and ARROW_GUTTER or BLANK_GUTTER
+    local name = s.name or U.DEFAULT_NAME
     any_spinning = any_spinning or style.spin
-    views[i] = {
-      style = style,
-      marked = marked,
-      sym = sym,
-      gutter = marked and ARROW_GUTTER or BLANK_GUTTER,
-      name = s.name or 'claude',
-    }
-  end
-  for i, v in ipairs(views) do
-    lines[entry_line(i)] = U.pad_to(
-      v.gutter .. v.sym .. string.rep(' ', SYM_GAP) .. v.name, width)
-    lines[entry_line(i) + 1] = U.pad_to(string.rep(' ', WORD_PAD) .. v.style.word, width)
-    lines[entry_line(i) + 2] = ''
-  end
-  for i, v in ipairs(views) do
+
     local lnum = entry_line(i) - 1 -- 0-based symbol line
-    local sym_col = #v.gutter
-    local name_col = sym_col + #v.sym + SYM_GAP
-    if v.marked then
-      marks[#marks + 1] = { lnum = lnum, col = 0, end_col = #lines[lnum + 1], hl = 'ClaudeSessionsPanelCursor' }
-      marks[#marks + 1] = { lnum = lnum + 1, col = 0, end_col = #lines[lnum + 2], hl = 'ClaudeSessionsPanelCursor' }
+    local name_line = U.pad_to(gutter .. sym .. string.rep(' ', SYM_GAP) .. name, width)
+    local word_line = U.pad_to(string.rep(' ', WORD_PAD) .. style.word, width)
+    lines[lnum + 1] = name_line
+    lines[lnum + 2] = word_line
+    lines[lnum + 3] = ''
+
+    local sym_col = #gutter
+    local name_col = sym_col + #sym + SYM_GAP
+    if marked then
+      marks[#marks + 1] = { lnum = lnum, col = 0, end_col = #name_line, hl = 'ClaudeSessionsPanelCursor' }
+      marks[#marks + 1] = { lnum = lnum + 1, col = 0, end_col = #word_line, hl = 'ClaudeSessionsPanelCursor' }
       -- col 1..4: one space, then the 3-byte ᐅ
       marks[#marks + 1] = { lnum = lnum, col = 1, end_col = 1 + #'ᐅ', hl = 'ClaudeSessionsPanelArrow' }
     end
-    marks[#marks + 1] = { lnum = lnum, col = sym_col, end_col = sym_col + #v.sym, hl = v.style.hl }
-    marks[#marks + 1] = { lnum = lnum, col = name_col, end_col = name_col + #v.name, hl = 'ClaudeSessionsPanelName' }
-    marks[#marks + 1] = { lnum = lnum + 1, col = WORD_PAD, end_col = WORD_PAD + #v.style.word, hl = v.style.hl }
+    marks[#marks + 1] = { lnum = lnum, col = sym_col, end_col = sym_col + #sym, hl = style.hl }
+    marks[#marks + 1] = { lnum = lnum, col = name_col, end_col = name_col + #name, hl = 'ClaudeSessionsPanelName' }
+    marks[#marks + 1] = { lnum = lnum + 1, col = WORD_PAD, end_col = WORD_PAD + #style.word, hl = style.hl }
   end
   U.set_rows(buf, ns, lines, marks)
   if any_spinning then start_spinner() end
@@ -212,14 +202,6 @@ local function follow_displayed(snap)
       return
     end
   end
-end
-
---- Display the session on row `row`. keep_focus keeps the cursor on the
---- panel (stepping); the focus juggling lives in show_session.
-local function select_row(row, keep_focus)
-  M.stepping = keep_focus
-  M.show(row)
-  M.stepping = false
 end
 
 --- The session row under the panel cursor, or nil when the panel is gone.
@@ -248,10 +230,10 @@ local function step(dir)
   step_timer = vim.defer_fn(function()
     step_timer = nil
     if not active() then return end
-    select_row(cursor_row(), true)
+    M.show(cursor_row(), true)
     arrow_row = nil -- the switch settled: the marker rests on the display
     M.refresh()
-    -- select_row left focus on the just-opened terminal; take it back one
+    -- the switch left focus on the just-opened terminal; take it back one
     -- pass later (see reclaim_focus for why).
     M.reclaim_focus()
   end, 120)
@@ -260,7 +242,7 @@ end
 -- <CR>/l/o: switch to the session under the cursor and focus it.
 local function open_current()
   local row = cursor_row()
-  if row then select_row(row, false) end
+  if row then M.show(row, false) end
 end
 
 -- <C-d>: kill the session under the cursor. Focus stays on the panel.
@@ -304,7 +286,7 @@ local function rename_current_row()
   if not row or renaming then return end
   local s = snapshot()[row]
   if not s then return end
-  local name = s.name or 'claude'
+  local name = s.name or U.DEFAULT_NAME
   local lnum = entry_line(row) - 1 -- 0-based symbol line
   -- The symbol can be a 3-byte spinner frame mid-animation, so the name's
   -- byte offset is read off the row text itself.
@@ -428,11 +410,7 @@ function M.open()
 
   local buf = U.scratch_buffer('claude-sessions-panel')
   local height = math.floor(vim.o.lines * 0.3)
-  vim.api.nvim_set_current_win(tw)
-  vim.cmd('below ' .. height .. 'split')
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(win, buf)
-  U.plain_text_window(win) -- the split inherits the tree's options
+  local win = U.split_below(tw, height, buf, U.plain_text_window)
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
 
   M.buf, M.win = buf, win

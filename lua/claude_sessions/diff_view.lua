@@ -60,6 +60,17 @@ local function plain_diff_window(win)
   U.apply_winopts(win, PANE_LOOK)
 end
 
+-- The view rows and the header offset render.render left in the pane buffer —
+-- diffview's b-var contract, read through one pair of accessors so its spelling
+-- and its default live in one place.
+local function view_rows(buf)
+  return vim.b[buf].diffview_rows
+end
+
+local function view_offset(buf)
+  return vim.b[buf].diffview_offset or 0
+end
+
 --- Hand the taken-over editor window back. `win` invalid (a manual :close):
 --- open the buffer in a fresh split anchored on the tree. Clears M.replaced
 --- either way; no-op when nothing was taken over.
@@ -73,7 +84,7 @@ local function restore_replaced(win)
     win = vim.api.nvim_get_current_win()
   end
   for opt, val in pairs(saved.opts) do
-    pcall(function() vim.wo[win][opt] = val end)
+    vim.wo[win][opt] = val
   end
   vim.api.nvim_win_set_buf(win, saved.buf)
   pcall(vim.api.nvim_win_set_cursor, win, saved.cursor)
@@ -114,8 +125,7 @@ end
 --- add/del rows, read off the pane's own buffer.
 local function jump_hunk(d)
   local buf = vim.api.nvim_get_current_buf()
-  local rows = vim.b[buf].diffview_rows
-  local offset = vim.b[buf].diffview_offset or 0
+  local rows, offset = view_rows(buf), view_offset(buf)
   local total = vim.api.nvim_buf_line_count(buf)
   local function is_change(i)
     return change_row(rows and i > 0 and rows[i])
@@ -153,8 +163,7 @@ local function jump_to_source()
   local buf = vim.api.nvim_get_current_buf()
   local abspath = vim.b[buf].diffview_abspath
   if not abspath then return end
-  local rows = vim.b[buf].diffview_rows
-  local offset = vim.b[buf].diffview_offset or 0
+  local rows, offset = view_rows(buf), view_offset(buf)
   local target
   for i = vim.api.nvim_win_get_cursor(0)[1] - offset, 1, -1 do
     local r = rows and rows[i]
@@ -251,7 +260,7 @@ end
 
 -- View-row index (1-based) of the cursor's current line, or nil for headers.
 local function cursor_row(buf)
-  local offset = vim.b[buf].diffview_offset or 0
+  local offset = view_offset(buf)
   local sline = vim.api.nvim_win_get_cursor(0)[1]
   if sline <= offset then return nil end
   return sline - offset
@@ -319,7 +328,7 @@ function M.revert_line()
   local t = pane_target(true)
   if not t then return end
   local buf = vim.api.nvim_get_current_buf() -- the guard pinned it to M.buf
-  local rows = vim.b[buf].diffview_rows
+  local rows = view_rows(buf)
   local idx = cursor_row(buf)
   local r = rows and idx and rows[idx]
   if not change_row(r) then
@@ -345,8 +354,7 @@ function M.revert_line()
 
   -- land the cursor on the next remaining change line — the row under it may
   -- now hold the rest of the same hunk, which still counts as "next".
-  local rows2 = vim.b[buf].diffview_rows
-  local off2 = vim.b[buf].diffview_offset or 0
+  local rows2, off2 = view_rows(buf), view_offset(buf)
   for i = math.max(vim.api.nvim_win_get_cursor(0)[1], off2 + 1), vim.api.nvim_buf_line_count(buf) do
     if change_row(rows2[i - off2]) then
       vim.api.nvim_win_set_cursor(0, { i, 0 })
@@ -379,8 +387,9 @@ function M.undo_revert()
   -- return the cursor to the reverted line: an added line is back as a
   -- context row carrying its new-side number; a removed line is a del row
   -- again under its old-side number.
-  local rows = vim.b[buf].diffview_rows
-  local offset = vim.b[buf].diffview_offset or 0
+  local buf = M.buf -- the pane's buffer: after_edit re-rendered it
+  if not U.valid_buf(buf) then return end
+  local rows, offset = view_rows(buf), view_offset(buf)
   local target
   if entry.kind == 'add' then
     for i, r in ipairs(rows) do
@@ -528,12 +537,13 @@ function M.show(rel, root, force)
   -- and stands — neither half holds a state to flip.
   last_target = { rel = rel, root = root }
 
+  local path = root .. '/' .. rel -- the absolute form every reader wants
   local old_raw = git.git_show_raw(root, 'HEAD:' .. rel) -- nil for untracked files
-  local new_raw = git.read_file_raw(root .. '/' .. rel) -- nil for deleted files
+  local new_raw = git.read_file_raw(path) -- nil for deleted files
   local rows, counts
   -- The binary probe is skipped on a forced re-render: the edit path just
   -- round-tripped the file through text reads and writes.
-  if not force and git.is_binary(root, rel, root .. '/' .. rel) then
+  if not force and git.is_binary(root, rel, path) then
     rows = { render.row('Binary file differs (not shown)', 'del', nil, 1) }
     counts = { add = 0, del = 1 }
   else
@@ -547,9 +557,9 @@ function M.show(rel, root, force)
     set_keymaps(buf)
     M.buf = buf
   end
-  render.render(buf, root .. '/' .. rel, rel, rows, counts)
+  render.render(buf, path, rel, rows, counts)
   -- treesitter lifting reads raw content again; spell the sides once more
-  render.apply_treesitter(buf, root .. '/' .. rel, rows, old_raw, new_raw)
+  render.apply_treesitter(buf, path, rows, old_raw, new_raw)
   show_window(buf)
 
   -- Land the cursor on the first change, so the pane opens on the file's
@@ -558,8 +568,7 @@ function M.show(rel, root, force)
   if same_target then return end
   vim.schedule(function()
     if not (U.valid_win(M.win) and U.valid_buf(buf)) then return end
-    local rows2 = vim.b[buf].diffview_rows
-    local off2 = vim.b[buf].diffview_offset or 0
+    local rows2, off2 = view_rows(buf), view_offset(buf)
     for i = 1, #(rows2 or {}) do
       if change_row(rows2[i]) then
         pcall(vim.api.nvim_win_set_cursor, M.win, { off2 + i, 0 })
