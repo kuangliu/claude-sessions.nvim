@@ -522,6 +522,12 @@ end
 --- The split itself (root and tree window known, workspace dirty). Runs
 --- inside the status job's callback (scheduled).
 local function open_split(root, tw)
+  -- The tree can close while the probes are in flight (toggling the sidebar
+  -- closes the panels): no anchor, no panel — never split below a dead one.
+  if not U.valid_win(tw) then
+    opening = false
+    return
+  end
   local buf = U.scratch_buffer('claude-sessions-diff')
   set_keymaps(buf)
   -- Seed the split with a plain third; the calibration below asserts the

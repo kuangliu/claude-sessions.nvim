@@ -1173,11 +1173,31 @@ function M.setup(user_opts)
   panel.setup()
   diff.setup()
 
-  -- The diff panel needs a tree window to split above; the tree closing
-  -- takes it with it.
+  -- The sidebar toggles as one: closing the tree (the <Leader>f toggle, q in
+  -- the tree) takes the panels in its column with it — the session panel via
+  -- panel.setup's WinClosed, the diff panel here. Without this the diff panel
+  -- was left behind, alone in the tree's column.
+  vim.api.nvim_create_autocmd('WinClosed', {
+    callback = function(ev)
+      local winid = tonumber(ev.match)
+      if not winid then return end
+      local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
+      if ok and buf and vim.bo[buf].filetype == 'NvimTree' then
+        diff.close()
+      end
+    end,
+  })
+
+  -- The diff panel needs a tree window to split above; opening the tree
+  -- brings it back. Deferred one pass: FileType NvimTree fires from
+  -- nvim-tree's create_buffer(), BEFORE its window exists, so a synchronous
+  -- open with a cached repo root would find no tree to split below and leave
+  -- the panel to the poll loop.
   vim.api.nvim_create_autocmd('FileType', {
     pattern = 'NvimTree',
-    callback = function() diff.sync(M.is_visible()) end,
+    callback = function()
+      vim.schedule(function() diff.sync(M.is_visible()) end)
+    end,
   })
 end
 

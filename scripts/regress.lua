@@ -356,6 +356,59 @@ elseif scenario == 'panel-smoke' then
   assert_(vim.fn.maparg('j', 'n', false, panel_b) ~= '', 'panel j map missing')
   ok()
 
+elseif scenario == 'tree-toggle' then
+  -- Closing the tree takes both sidebar panels down with it; reopening the
+  -- tree (filetype set BEFORE the window exists, as nvim-tree does) brings
+  -- both back.
+  local repo = vim.fn.tempname()
+  vim.fn.mkdir(repo, 'p')
+  vim.fn.system({ 'git', '-C', repo, 'init', '-q' })
+  vim.fn.writefile({ 'one' }, repo .. '/f.txt')
+  vim.fn.system({ 'git', '-C', repo, 'add', '.' })
+  vim.fn.system({
+    'git', '-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init',
+  })
+  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt') -- dirty workspace
+  vim.fn.chdir(repo)
+
+  local function sidebar()
+    return {
+      tree = U.window_with_filetype('NvimTree'),
+      panel = U.window_with_filetype('claude-sessions-panel'),
+      diff = U.window_with_filetype('claude-sessions-diff'),
+    }
+  end
+  local function both_up()
+    local s = sidebar()
+    return s.tree ~= nil and s.panel ~= nil and s.diff ~= nil
+  end
+
+  -- Open the tree, then start a session: both panels attach below it.
+  vim.cmd('new')
+  local tree_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(0, tree_buf)
+  vim.bo[tree_buf].filetype = 'NvimTree'
+  sessions(1)
+  assert_(vim.wait(3000, both_up, 20), 'panels did not attach below the open tree')
+
+  -- Toggle closed: no sidebar window may survive.
+  vim.api.nvim_win_close(sidebar().tree, true)
+  local down = vim.wait(1000, function()
+    local s = sidebar()
+    return not s.tree and not s.panel and not s.diff
+  end, 20)
+  assert_(down, 'closing the tree left a sidebar panel behind')
+
+  -- Toggle open in nvim-tree's own order: filetype first, window second.
+  -- The cached repo root reaches the open probe synchronously, so the
+  -- deferred sync is what finds the tree window.
+  local tree_buf2 = vim.api.nvim_create_buf(false, true)
+  vim.bo[tree_buf2].filetype = 'NvimTree'
+  vim.cmd('new')
+  vim.api.nvim_win_set_buf(0, tree_buf2)
+  assert_(vim.wait(3000, both_up, 20), 'reopening the tree did not bring the panels back')
+  ok()
+
 elseif scenario == 'zoom-no-park' then
   -- Zoomed C-s keeps the float on real session content the whole way: it
   -- never swaps to a scratch buffer, no split shows a session terminal

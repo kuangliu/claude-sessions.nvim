@@ -102,6 +102,10 @@ with nothing but the sessions layout on screen the pane splits beside the
 terminal instead. Soft dependency: without diffview installed the panel still tracks
 changes and moves the selection — just with no right-side diff.
 
+The diff panel follows the tree like the session panel: closing nvim-tree
+(the `<Leader>f` toggle or `q` in the tree) takes it down with the tree, and
+reopening the tree brings it back.
+
 ## Auto-reload
 
 While a session's agent is working, file buffers it changes on disk are
