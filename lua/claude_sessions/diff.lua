@@ -503,11 +503,21 @@ function M.refresh(then_)
   end)
 end
 
+-- Set while a keep-pane teardown closes the panel's WINDOW: the buffer-local
+-- WinClosed fires re-entrantly inside that close and must not take the kept
+-- pane down with it.
+local closing_keep_pane = false
+
 --- Tear the panel down (window + buffer); the sidebar re-settles to thirds.
-function M.close()
+--- `keep_pane` leaves the right-side diff pane standing — the tree toggle
+--- closes the sidebar, not the review.
+function M.close(keep_pane)
+  if closing_keep_pane then keep_pane = true end
   if M.active() then
     local tw, lw = U.tree_window(), U.window_with_filetype('claude-sessions-panel')
+    closing_keep_pane = true
     pcall(vim.api.nvim_win_close, M.win, true)
+    closing_keep_pane = false
     U.calibrate_sidebar(tw, lw)
   end
   if U.valid_buf(M.buf) then
@@ -516,7 +526,9 @@ function M.close()
   M.win, M.buf = nil, nil
   last_text, last_row, last_files, panel_root = nil, nil, nil, nil
   review_started = false -- the sweep ended with the panel
-  diff_view.close() -- the right-side pane dies with the panel
+  if not keep_pane then
+    diff_view.close() -- the right-side pane dies with the panel
+  end
 end
 
 --- The split itself (root and tree window known, workspace dirty). Runs

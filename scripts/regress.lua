@@ -391,13 +391,21 @@ elseif scenario == 'tree-toggle' then
   sessions(1)
   assert_(vim.wait(3000, both_up, 20), 'panels did not attach below the open tree')
 
-  -- Toggle closed: no sidebar window may survive.
+  -- Toggle closed: no sidebar window may survive, but the right-side diff
+  -- pane (the review) stays — the tree closes the sidebar, not the review.
+  local diff_view = require('claude_sessions.diff_view')
+  local real_close, pane_closes = diff_view.close, 0
+  diff_view.close = function()
+    pane_closes = pane_closes + 1
+    return real_close()
+  end
   vim.api.nvim_win_close(sidebar().tree, true)
   local down = vim.wait(1000, function()
     local s = sidebar()
     return not s.tree and not s.panel and not s.diff
   end, 20)
   assert_(down, 'closing the tree left a sidebar panel behind')
+  assert_eq(pane_closes, 0, 'closing the tree closed the right-side diff pane')
 
   -- Toggle open in nvim-tree's own order: filetype first, window second.
   -- The cached repo root reaches the open probe synchronously, so the
@@ -407,6 +415,12 @@ elseif scenario == 'tree-toggle' then
   vim.cmd('new')
   vim.api.nvim_win_set_buf(0, tree_buf2)
   assert_(vim.wait(3000, both_up, 20), 'reopening the tree did not bring the panels back')
+
+  -- A plain close (visibility going away) still takes the pane with it.
+  pane_closes = 0
+  require('claude_sessions.diff').close()
+  assert_(pane_closes > 0, 'a plain panel close no longer closes the diff pane')
+  diff_view.close = real_close
   ok()
 
 elseif scenario == 'zoom-no-park' then

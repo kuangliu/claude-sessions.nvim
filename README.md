@@ -95,7 +95,7 @@ back into it; the cursor steps to the next remaining change), `u` undoes the
 last `d`, `D` reverts the whole shown file after a `y/N` prompt (the same
 machinery as the panel's `<C-d>`), and `c` prompts for a commit message,
 stages everything and commits. Moving the cursor out of the panel does not exit the diff — it
-stays until the panel closes, the workspace goes clean, or you press `q` on
+stays until the sessions layout goes away, the workspace goes clean, or you press `q` on
 the pane itself. The diff takes over the editor window: your file steps aside
 (cursor and window options remembered) and comes back when the pane exits;
 with nothing but the sessions layout on screen the pane splits beside the
@@ -103,8 +103,9 @@ terminal instead. Soft dependency: without diffview installed the panel still tr
 changes and moves the selection — just with no right-side diff.
 
 The diff panel follows the tree like the session panel: closing nvim-tree
-(the `<Leader>f` toggle or `q` in the tree) takes it down with the tree, and
-reopening the tree brings it back.
+(the `<Leader>f` toggle or `q` in the tree) takes the file list down with the
+tree, and reopening the tree brings it back. The right-side diff pane is not
+part of that teardown — the review stays open when the sidebar goes away.
 
 ## Auto-reload
 

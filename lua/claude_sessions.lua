@@ -990,6 +990,13 @@ function M.close_window()
   return true
 end
 
+--- Dismiss the right-side diff pane; the diff panel (and its selection)
+--- stays. Exposed for window-navigation maps that leave the diff panel —
+--- the pin keeps the pane open on a plain focus move otherwise.
+function M.close_diff_pane()
+  diff_view.close()
+end
+
 --- Is there at least one live session?
 function M.has_sessions()
   return #sessions > 0
@@ -1183,7 +1190,7 @@ function M.setup(user_opts)
       if not winid then return end
       local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
       if ok and buf and vim.bo[buf].filetype == 'NvimTree' then
-        diff.close()
+        diff.close(true) -- the sidebar goes, the right-side diff pane stays
       end
     end,
   })
