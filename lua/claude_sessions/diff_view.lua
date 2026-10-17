@@ -499,10 +499,9 @@ local function show_window(buf)
     -- terminal fights it over the pty size and garbles the TUI.
     local host = U.session_window()
     local prev = vim.api.nvim_get_current_win()
-    local host_buf, host_width
+    local host_buf
     if host then
       host_buf = vim.api.nvim_win_get_buf(host)
-      host_width = vim.api.nvim_win_get_width(host)
       vim.api.nvim_win_set_buf(host, buf)
     end
     U.focus(host)
@@ -512,17 +511,10 @@ local function show_window(buf)
     vim.o.splitright = splitright
     win = vim.api.nvim_get_current_win()
     if host then vim.api.nvim_win_set_buf(host, host_buf) end
-    -- The session terminal keeps its configured width; the pane takes the
-    -- remainder of the editor column (never squeezing the terminal below its
-    -- current width). Without a configured width, target 40% of the screen
-    -- but never take more than half the host.
-    if host and U.terminal_width() then
-      U.fit_terminal_width(host, win)
-    else
-      local width = math.max(20, math.floor(vim.o.columns * 0.4))
-      if host_width then width = math.min(width, math.max(10, math.floor(host_width / 2))) end
-      pcall(vim.cmd, 'vertical resize ' .. width)
-    end
+    -- Proportional columns: the sidebar back to nvim-tree's width, the
+    -- terminal at its configured width, the pane the remainder. Without a
+    -- configured width the split above already gave the pane half.
+    U.normalize_columns(win)
     handback = prev -- the split stole focus; hand it back once landed
   end
   -- One landing for both placements: the pane's buffer, its look, at the

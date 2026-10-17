@@ -554,6 +554,51 @@ elseif scenario == 'broken-open-repair' then
   assert_(not U.sidebar_overlap(file_win), 'the file window still overlaps the sidebar')
   ok()
 
+elseif scenario == 'width-normalize' then
+  -- A closed editor's width can land in a pinned neighbour (nvim-tree and
+  -- toggleterm set 'winfixwidth'); the normalizer restores the sidebar and
+  -- terminal widths and leaves the remainder to the editor column.
+  vim.o.columns = 168
+  vim.o.lines = 49
+  package.loaded['nvim-tree.view-state'] = { Active = { initial_width = 30 } }
+  require('toggleterm.config').get = function(key)
+    if key == 'size' then return 32 end
+    return true
+  end
+
+  vim.cmd('vsplit')
+  vim.cmd('vsplit')
+  local ws = {}
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do ws[#ws + 1] = w end
+  table.sort(ws, function(a, b)
+    return vim.api.nvim_win_get_position(a)[2] < vim.api.nvim_win_get_position(b)[2]
+  end)
+  local side, ed, term = ws[1], ws[2], ws[3]
+  -- Distinct buffers: vsplit windows share the buffer, and the filetypes
+  -- must be per window.
+  local side_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[side_buf].filetype = 'NvimTree'
+  local term_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[term_buf].filetype = 'claude'
+  local ed_buf = vim.api.nvim_create_buf(false, false)
+  vim.api.nvim_win_set_buf(side, side_buf)
+  vim.api.nvim_win_set_buf(ed, ed_buf)
+  vim.api.nvim_win_set_buf(term, term_buf)
+  vim.wo[side].winfixwidth = true
+  vim.wo[term].winfixwidth = true
+
+  -- The mess: the sidebar swallowed the editor's width, the editor is a
+  -- sliver, the terminal is narrower than configured.
+  vim.api.nvim_win_set_width(term, 28)
+  vim.api.nvim_win_set_width(ed, 10)
+  vim.api.nvim_win_set_width(side, 60)
+
+  U.normalize_columns()
+  assert_eq(vim.api.nvim_win_get_width(side), 30, 'sidebar width not normalized')
+  assert_eq(vim.api.nvim_win_get_width(term), 32, 'terminal width not normalized')
+  assert_(vim.api.nvim_win_get_width(ed) > 10, 'editor did not take the remainder')
+  ok()
+
 elseif scenario == 'zoom-no-park' then
   -- Zoomed C-s keeps the float on real session content the whole way: it
   -- never swaps to a scratch buffer, no split shows a session terminal

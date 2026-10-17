@@ -1226,6 +1226,20 @@ function M.setup(user_opts)
     end,
   })
 
+  -- An editor window closing hands its width to a pinned neighbour: nvim-tree
+  -- and toggleterm both set 'winfixwidth', so the sidebar can balloon and the
+  -- terminal shrink. Re-normalize once the layout settles.
+  vim.api.nvim_create_autocmd('WinClosed', {
+    callback = function(ev)
+      local winid = tonumber(ev.match)
+      if not winid then return end
+      local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
+      if not ok or vim.bo[buf].buftype ~= '' then return end
+      if not M.is_visible() then return end
+      vim.schedule(U.normalize_columns)
+    end,
+  })
+
   -- WinClosed fires while the window is still valid, so its buffer identifies
   -- the tree.
   vim.api.nvim_create_autocmd('WinClosed', {

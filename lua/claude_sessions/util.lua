@@ -134,8 +134,7 @@ function U.repair_editor_window(win)
   pcall(vim.api.nvim_win_set_cursor, target, cursor)
   vim.api.nvim_set_current_win(target)
   pcall(vim.api.nvim_win_close, win, true)
-  local host = U.session_window()
-  if host then U.fit_terminal_width(host, target) end
+  U.normalize_columns()
 end
 
 --- The configured width of a vertical session terminal (toggleterm's `size`,
@@ -155,16 +154,36 @@ end
 -- Narrowest editor column left when fitting the terminal's width.
 local MIN_EDITOR_WIDTH = 10
 
---- Fit the session terminal to its configured width inside the space it and
---- `slot` share, leaving the slot the remainder. The terminal never shrinks
---- below its current width, and the slot never below MIN_EDITOR_WIDTH.
-function U.fit_terminal_width(host, slot)
+--- nvim-tree's resolved sidebar width, or nil when unknown/adaptive.
+function U.tree_width()
+  local ok, vs = pcall(require, 'nvim-tree.view-state')
+  if ok and vs.Active and not vs.Active.adaptive_size
+      and type(vs.Active.initial_width) == 'number' then
+    return vs.Active.initial_width
+  end
+end
+
+--- Restore the sessions column proportions: sidebar at nvim-tree's width,
+--- session terminal at its configured width, editor column takes the rest.
+--- nvim-tree and toggleterm both set 'winfixwidth', so Neovim hands a closed
+--- editor's width to one of them — the sidebar can balloon and the terminal
+--- shrink. Called after every layout change the plugin drives. `slot` is the
+--- editor-side window when it is not yet an editable one (the diff pane's
+--- fallback split).
+function U.normalize_columns(slot)
+  local host = U.session_window()
+  if not host then return end
+  local tree = U.tree_window()
+  local side = U.tree_width()
+  if tree and side and vim.api.nvim_win_get_width(tree) ~= side then
+    pcall(vim.api.nvim_win_set_width, tree, side)
+  end
   local term = U.terminal_width()
-  if not (term and U.valid_win(host) and U.valid_win(slot)) then return end
-  local total = vim.api.nvim_win_get_width(host) + vim.api.nvim_win_get_width(slot)
-  local target = math.max(vim.api.nvim_win_get_width(host),
-    math.min(term, total - MIN_EDITOR_WIDTH))
-  if target < total then
+  local ed = slot or U.editor_window()
+  if not (term and ed) then return end
+  local total = vim.api.nvim_win_get_width(host) + vim.api.nvim_win_get_width(ed)
+  local target = math.min(term, total - MIN_EDITOR_WIDTH)
+  if target >= MIN_EDITOR_WIDTH and target ~= vim.api.nvim_win_get_width(host) then
     pcall(vim.api.nvim_win_set_width, host, target)
   end
 end
@@ -175,7 +194,10 @@ end
 --- lands inside the sidebar column. nil without a terminal to anchor on.
 function U.ensure_editor_window(except)
   local win = U.editor_window(except)
-  if win then return win end
+  if win then
+    U.normalize_columns()
+    return win
+  end
   -- A real session window, never the zoom float: splitting from a float
   -- lands a degenerate full-width window.
   local host = U.session_window()
@@ -194,11 +216,11 @@ function U.ensure_editor_window(except)
   vim.o.splitright = splitright
   win = ok and vim.api.nvim_get_current_win() or nil
   vim.api.nvim_win_set_buf(host, host_buf) -- the terminal goes straight back
-  if win and win ~= host then U.fit_terminal_width(host, win) end
   if not win or win == host then
     U.focus(prev, host)
     return nil
   end
+  U.normalize_columns()
   U.focus(prev, win)
   return win
 end
