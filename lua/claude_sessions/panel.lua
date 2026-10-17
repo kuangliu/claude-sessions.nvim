@@ -531,42 +531,9 @@ function M.setup()
   vim.api.nvim_create_autocmd('ColorScheme', { callback = define_highlights })
   install_mode_guard()
 
-  -- The panel follows the tree: it attaches below a freshly opened tree when
-  -- a session is displayed (handing focus back to the tree), and goes with
-  -- the tree when that closes.
-  vim.api.nvim_create_autocmd('FileType', {
-    pattern = 'NvimTree',
-    callback = function()
-      vim.schedule(function()
-        local visible = false
-        for _, s in ipairs(snapshot()) do
-          visible = visible or s.open
-        end
-        if not visible then return end
-        local tw = U.tree_window()
-        if not tw then return end
-        if active() then
-          M.refresh() -- panel already up: just re-sync the rows
-          return
-        end
-        M.open()
-        U.focus(tw) -- hand focus back to the tree just opened
-      end)
-    end,
-  })
-  -- Tree closed: view.close() only closes the tree WINDOW (the NvimTree
-  -- buffer survives for the next toggle), so the reliable signal is WinClosed
-  -- for a window showing the tree's buffer.
-  vim.api.nvim_create_autocmd('WinClosed', {
-    pattern = '*',
-    callback = function(ev)
-      local winid = tonumber(ev.match)
-      if not winid then return end
-      local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
-      if not ok or not buf or vim.bo[buf].filetype ~= 'NvimTree' then return end
-      if active() then M.close() end
-    end,
-  })
+  -- The tree-follow policy (attach below a freshly opened tree, go with it on
+  -- close) lives in claude_sessions.setup: one pair of autocmds drives both
+  -- this panel and the diff panel.
 end
 
 return M

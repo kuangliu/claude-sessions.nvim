@@ -8,11 +8,11 @@
 -- buffers. A failed assert prints FAIL and exits nonzero (cq!); a passing
 -- one prints "<scenario> OK" and exits 0. The suite covers the display /
 -- zoom / shell paths that carry the plugin's load-bearing invariants; the
--- panel render smoke covers the row machinery. Not covered: on_session_exit
--- (the toggleterm stub ignores spec.on_exit), the diff panel's git jobs
--- (the harness chdirs to a non-git temp dir, so the probes no-op), and
--- t-mode keymap callbacks that depend on a live input loop (feedkeys never
--- applies the mode transition inside a -l script).
+-- panel render smoke covers the row machinery, and tree-toggle chdirs into a
+-- real temp repo so the diff panel's git probes run. Not covered:
+-- on_session_exit (the toggleterm stub ignores spec.on_exit) and t-mode
+-- keymap callbacks that depend on a live input loop (feedkeys never applies
+-- the mode transition inside a -l script).
 
 -- Resolve the repo root from this script's own path (absolute invocation;
 -- `vim.fs.abspath` normalizes the relative form `nvim -l scripts/...` yields).
@@ -126,6 +126,18 @@ end
 
 local function sessions(n)
   for _ = 1, n do M.create() end
+end
+
+-- A fake nvim-tree window: a scratch buffer with ft NvimTree shown in a new
+-- window. `ft_first` emulates nvim-tree's own order — create_buffer() sets
+-- the filetype, open_window() creates the window after.
+local function open_tree(ft_first)
+  local buf = vim.api.nvim_create_buf(false, true)
+  if ft_first then vim.bo[buf].filetype = 'NvimTree' end
+  vim.cmd('new')
+  vim.api.nvim_win_set_buf(0, buf)
+  if not ft_first then vim.bo[buf].filetype = 'NvimTree' end
+  return buf
 end
 
 -- Is `buf` a live session terminal (buftype terminal, not the shell)?
@@ -343,10 +355,7 @@ elseif scenario == 'zoomed-cb' then
 
 elseif scenario == 'panel-smoke' then
   -- A tree window + sessions draw the panel with rows and working maps.
-  vim.cmd('new')
-  local tree_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(0, tree_buf)
-  vim.bo[tree_buf].filetype = 'NvimTree'
+  open_tree(true)
   sessions(2)
   local panel_w = U.window_with_filetype('claude-sessions-panel')
   assert_(panel_w, 'no session panel window')
@@ -380,14 +389,11 @@ elseif scenario == 'tree-toggle' then
   end
   local function both_up()
     local s = sidebar()
-    return s.tree ~= nil and s.panel ~= nil and s.diff ~= nil
+    return s.tree and s.panel and s.diff
   end
 
   -- Open the tree, then start a session: both panels attach below it.
-  vim.cmd('new')
-  local tree_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(0, tree_buf)
-  vim.bo[tree_buf].filetype = 'NvimTree'
+  open_tree(false)
   sessions(1)
   assert_(vim.wait(3000, both_up, 20), 'panels did not attach below the open tree')
 
@@ -402,7 +408,7 @@ elseif scenario == 'tree-toggle' then
   vim.api.nvim_win_close(sidebar().tree, true)
   local down = vim.wait(1000, function()
     local s = sidebar()
-    return not s.tree and not s.panel and not s.diff
+    return not (s.tree or s.panel or s.diff)
   end, 20)
   assert_(down, 'closing the tree left a sidebar panel behind')
   assert_eq(pane_closes, 0, 'closing the tree closed the right-side diff pane')
@@ -410,16 +416,13 @@ elseif scenario == 'tree-toggle' then
   -- Toggle open in nvim-tree's own order: filetype first, window second.
   -- The cached repo root reaches the open probe synchronously, so the
   -- deferred sync is what finds the tree window.
-  local tree_buf2 = vim.api.nvim_create_buf(false, true)
-  vim.bo[tree_buf2].filetype = 'NvimTree'
-  vim.cmd('new')
-  vim.api.nvim_win_set_buf(0, tree_buf2)
+  open_tree(true)
   assert_(vim.wait(3000, both_up, 20), 'reopening the tree did not bring the panels back')
 
-  -- A plain close (visibility going away) still takes the pane with it.
-  pane_closes = 0
+  -- A plain close (visibility going away) still takes the pane with it —
+  -- exactly once: the teardown does not re-enter itself.
   require('claude_sessions.diff').close()
-  assert_(pane_closes > 0, 'a plain panel close no longer closes the diff pane')
+  assert_eq(pane_closes, 1, 'a plain panel close no longer closes the diff pane')
   diff_view.close = real_close
   ok()
 

@@ -1180,30 +1180,39 @@ function M.setup(user_opts)
   panel.setup()
   diff.setup()
 
-  -- The sidebar toggles as one: closing the tree (the <Leader>f toggle, q in
-  -- the tree) takes the panels in its column with it — the session panel via
-  -- panel.setup's WinClosed, the diff panel here. Without this the diff panel
-  -- was left behind, alone in the tree's column.
+  -- The sidebar follows the tree as one unit: opening the tree brings both
+  -- panels up below it; closing the tree (the <Leader>f toggle, q in the
+  -- tree) takes them down. The right-side diff pane is not part of the
+  -- teardown — the review stays open when the sidebar goes away.
+  --
+  -- The open is deferred one pass: FileType NvimTree fires from nvim-tree's
+  -- create_buffer(), BEFORE its window exists, so a synchronous open with a
+  -- cached repo root would find no tree to split below and leave the panels
+  -- to the poll loop.
+  vim.api.nvim_create_autocmd('FileType', {
+    pattern = 'NvimTree',
+    callback = function()
+      vim.schedule(function()
+        if not M.is_visible() then return end
+        local tw = U.tree_window()
+        if not tw then return end
+        panel.open() -- refreshes when already up
+        diff.open() -- no-op when already up; probes the workspace
+        U.focus(tw) -- hand focus back to the tree just opened
+      end)
+    end,
+  })
+
+  -- WinClosed fires while the window is still valid, so its buffer identifies
+  -- the tree.
   vim.api.nvim_create_autocmd('WinClosed', {
     callback = function(ev)
       local winid = tonumber(ev.match)
       if not winid then return end
       local ok, buf = pcall(vim.api.nvim_win_get_buf, winid)
-      if ok and buf and vim.bo[buf].filetype == 'NvimTree' then
-        diff.close(true) -- the sidebar goes, the right-side diff pane stays
-      end
-    end,
-  })
-
-  -- The diff panel needs a tree window to split above; opening the tree
-  -- brings it back. Deferred one pass: FileType NvimTree fires from
-  -- nvim-tree's create_buffer(), BEFORE its window exists, so a synchronous
-  -- open with a cached repo root would find no tree to split below and leave
-  -- the panel to the poll loop.
-  vim.api.nvim_create_autocmd('FileType', {
-    pattern = 'NvimTree',
-    callback = function()
-      vim.schedule(function() diff.sync(M.is_visible()) end)
+      if not (ok and vim.bo[buf].filetype == 'NvimTree') then return end
+      panel.close() -- the session list
+      diff.close(true) -- the changed-files list; its right-side pane stays
     end,
   })
 end

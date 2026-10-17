@@ -503,27 +503,22 @@ function M.refresh(then_)
   end)
 end
 
--- Set while a keep-pane teardown closes the panel's WINDOW: the buffer-local
--- WinClosed fires re-entrantly inside that close and must not take the kept
--- pane down with it.
-local closing_keep_pane = false
-
 --- Tear the panel down (window + buffer); the sidebar re-settles to thirds.
 --- `keep_pane` leaves the right-side diff pane standing — the tree toggle
 --- closes the sidebar, not the review.
 function M.close(keep_pane)
-  if closing_keep_pane then keep_pane = true end
-  if M.active() then
+  local win, buf = M.win, M.buf
+  -- Release the state BEFORE the window close: the buffer-local WinClosed
+  -- fires re-entrantly inside it and must see the panel as already gone.
+  M.win, M.buf = nil, nil
+  if U.valid_win(win) then
     local tw, lw = U.tree_window(), U.window_with_filetype('claude-sessions-panel')
-    closing_keep_pane = true
-    pcall(vim.api.nvim_win_close, M.win, true)
-    closing_keep_pane = false
+    pcall(vim.api.nvim_win_close, win, true)
     U.calibrate_sidebar(tw, lw)
   end
-  if U.valid_buf(M.buf) then
-    vim.api.nvim_buf_delete(M.buf, { force = true })
+  if U.valid_buf(buf) then
+    vim.api.nvim_buf_delete(buf, { force = true })
   end
-  M.win, M.buf = nil, nil
   last_text, last_row, last_files, panel_root = nil, nil, nil, nil
   review_started = false -- the sweep ended with the panel
   if not keep_pane then
@@ -563,7 +558,14 @@ local function open_split(root, tw)
   M.refresh()
 
   -- The window can also go away on its own; the full teardown runs here.
-  vim.api.nvim_create_autocmd('WinClosed', { buffer = buf, callback = function() M.close() end })
+  -- close() releases M.buf before its own window close, so this fires only
+  -- for closes from outside.
+  vim.api.nvim_create_autocmd('WinClosed', {
+    buffer = buf,
+    callback = function()
+      if M.buf == buf then M.close() end
+    end,
+  })
 end
 
 --- The split decision: the root is known, the workspace probe decides.
