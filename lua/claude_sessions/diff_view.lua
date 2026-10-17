@@ -449,24 +449,9 @@ local function set_keymaps(buf)
   U.map_key(buf, 'c', M.commit_changes, 'commit changes')
 end
 
---- The editor window the pane takes over: a real (non-floating) window with
---- a NORMAL buffer (no terminal, no qf/help). The LARGEST such window wins.
---- Nil when the screen holds nothing but the sessions layout.
-local function editor_window()
-  local best, best_area = nil, -1
-  for _, w in ipairs(U.real_windows()) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if U.valid_buf(b) and vim.bo[b].buftype == '' then
-      local area = vim.api.nvim_win_get_width(w) * vim.api.nvim_win_get_height(w)
-      if area > best_area then best, best_area = w, area end
-    end
-  end
-  return best
-end
-
 --- Show the pane buffer's window: reuse the pane's own window when up; else
 --- TAKE OVER an editor window (captured in M.replaced; release restores);
---- else split one beside the session terminal at the terminal's own width.
+--- else create the sessions layout's editor column and use it.
 local function show_window(buf)
   if M.active() then
     if vim.api.nvim_win_get_buf(M.win) ~= buf then
@@ -474,7 +459,7 @@ local function show_window(buf)
     end
     return
   end
-  local editor = editor_window()
+  local editor = U.editor_window()
   local win, handback = nil, nil
   if editor then
     -- The take-over: capture what the window holds, then swap the diff in.
@@ -491,31 +476,19 @@ local function show_window(buf)
     }
     win = editor
   else
-    -- Host for the split: a displayed session window keeps the pane BETWEEN
-    -- the tree and the terminal, not the far right the global `splitright`
-    -- would put it — flip splitright off for the one split. No session on
-    -- screen: plain vsplit from where we are. The split is hosted off an
-    -- empty buffer, never the terminal itself: a second window showing the
-    -- terminal fights it over the pty size and garbles the TUI.
-    local host = U.session_window()
+    -- No editor window: create the layout's editor column (splitting from
+    -- the session terminal, safely hosted off an empty buffer) and show the
+    -- pane there. Plain split when there is no terminal to anchor on.
     local prev = vim.api.nvim_get_current_win()
-    local host_buf
-    if host then
-      host_buf = vim.api.nvim_win_get_buf(host)
-      vim.api.nvim_win_set_buf(host, buf)
+    win = U.ensure_editor_window()
+    if not win then
+      local splitright = vim.o.splitright
+      vim.o.splitright = false
+      pcall(vim.cmd, 'vsplit')
+      vim.o.splitright = splitright
+      win = vim.api.nvim_get_current_win()
     end
-    U.focus(host)
-    local splitright = vim.o.splitright
-    vim.o.splitright = false
-    pcall(vim.cmd, 'vsplit')
-    vim.o.splitright = splitright
-    win = vim.api.nvim_get_current_win()
-    if host then vim.api.nvim_win_set_buf(host, host_buf) end
-    -- Proportional columns: the sidebar back to nvim-tree's width, the
-    -- terminal at its configured width, the pane the remainder. Without a
-    -- configured width the split above already gave the pane half.
-    U.normalize_columns(win)
-    handback = prev -- the split stole focus; hand it back once landed
+    handback = prev -- focus was stolen; hand it back once landed
   end
   -- One landing for both placements: the pane's buffer, its look, at the
   -- top.
@@ -589,23 +562,12 @@ function M.show(rel, root, force)
   end)
 end
 
---- Does an editable window other than `except` exist? The pane's own split
---- is the only editor candidate when it was opened without one.
-local function other_editor_window(except)
-  for _, w in ipairs(U.real_windows()) do
-    if w ~= except and vim.bo[vim.api.nvim_win_get_buf(w)].buftype == '' then
-      return true
-    end
-  end
-  return false
-end
-
 --- Tear the pane down (window + buffer). A taken-over editor window is NOT
 --- closed — it is the user's window: restore gives it back what the
 --- take-over found; only the pane's scratch buffer dies.
 function M.close()
   if not M.replaced and M.active() then
-    if other_editor_window(M.win) then
+    if U.editor_window(M.win) then
       pcall(vim.api.nvim_win_close, M.win, true)
     else
       -- The pane's split is the only editable window. Closing it would leave
@@ -613,9 +575,7 @@ function M.close()
       -- window — a new window inside the sidebar column, wrecking the
       -- layout. Leave an empty editor slot in its place instead (wiped once
       -- a file takes it over).
-      local buf = vim.api.nvim_create_buf(false, false)
-      vim.bo[buf].bufhidden = 'wipe'
-      vim.api.nvim_win_set_buf(M.win, buf)
+      vim.api.nvim_win_set_buf(M.win, U.empty_editor_buffer())
     end
   end
   release(M.win)

@@ -153,7 +153,37 @@ local function dirty_repo()
   })
   vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
   vim.fn.chdir(repo)
-  return repo
+end
+
+-- The sessions layout with a dirty workspace and both panels rendered.
+local function open_diff_layout()
+  dirty_repo()
+  open_tree(false)
+  sessions(1)
+  local diff = require('claude_sessions.diff')
+  assert_(vim.wait(3000, function()
+    return diff.active()
+      and (vim.api.nvim_buf_get_lines(diff.buf, 0, 1, false)[1] or '') ~= ''
+  end, 20), 'diff panel did not render rows')
+  return diff
+end
+
+-- Close every normal-buffer window: the no-editor state.
+local function close_editor_windows()
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.bo[b].buftype == '' then vim.api.nvim_win_close(w, true) end
+  end
+end
+
+-- The editable window (and its buffer) once one appears.
+local function wait_editor_slot()
+  local slot
+  assert_(vim.wait(1000, function()
+    slot = U.editor_window()
+    return slot ~= nil
+  end, 20), 'no editable window')
+  return slot, vim.api.nvim_win_get_buf(slot)
 end
 
 -- Is `buf` a live session terminal (buftype terminal, not the shell)?
@@ -437,21 +467,9 @@ elseif scenario == 'pane-close-slot' then
   -- No editor window: the diff pane lives in its own split. Closing it must
   -- leave an empty, nvim-tree-usable editor slot — otherwise nvim-tree's next
   -- file open splits the TREE window, putting a file inside the sidebar.
-  dirty_repo()
-  open_tree(false)
-  sessions(1)
-  local diff = require('claude_sessions.diff')
+  local diff = open_diff_layout()
   local diff_view = require('claude_sessions.diff_view')
-  assert_(vim.wait(3000, function()
-    return diff.active()
-      and (vim.api.nvim_buf_get_lines(diff.buf, 0, 1, false)[1] or '') ~= ''
-  end, 20), 'diff panel did not render rows')
-
-  -- Close every normal-buffer window: no editor is left.
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].buftype == '' then vim.api.nvim_win_close(w, true) end
-  end
+  close_editor_windows()
 
   -- Simulate the pane's fallback split (the diffview engine is not part of
   -- the harness): a nofile scratch in its own window, no taken-over editor.
@@ -467,14 +485,7 @@ elseif scenario == 'pane-close-slot' then
     return not diff.active() and not diff_view.active()
   end, 20), 'q did not close the panel and pane')
 
-  local slot, slot_buf
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].buftype == '' then
-      slot, slot_buf = w, b
-    end
-  end
-  assert_(slot, 'closing the pane left no editable window')
+  local _, slot_buf = wait_editor_slot()
   assert_eq(vim.api.nvim_buf_get_name(slot_buf), '', 'the editor slot is not an empty buffer')
   ok()
 
@@ -482,36 +493,14 @@ elseif scenario == 'panel-close-slot' then
   -- Closing the diff panel from outside with NO pane open and no editor
   -- window must still leave an editable window — nvim-tree's next file open
   -- would otherwise split the TREE inside the sidebar column.
-  dirty_repo()
-  open_tree(false)
-  sessions(1)
-  local diff = require('claude_sessions.diff')
-  assert_(vim.wait(3000, function()
-    return diff.active()
-      and (vim.api.nvim_buf_get_lines(diff.buf, 0, 1, false)[1] or '') ~= ''
-  end, 20), 'diff panel did not render rows')
-
-  -- No editor window, and no diff pane open.
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    local b = vim.api.nvim_win_get_buf(w)
-    if vim.bo[b].buftype == '' then vim.api.nvim_win_close(w, true) end
-  end
+  local diff = open_diff_layout()
+  close_editor_windows()
 
   -- q on the diff file panel (the global :exit map).
   vim.api.nvim_win_close(diff.win, true)
   assert_(vim.wait(1000, function() return not diff.active() end, 20), 'q did not close the panel')
 
-  local slot, slot_buf
-  assert_(vim.wait(1000, function()
-    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-      local b = vim.api.nvim_win_get_buf(w)
-      if vim.bo[b].buftype == '' then
-        slot, slot_buf = w, b
-        return true
-      end
-    end
-    return false
-  end, 20), 'closing the panel left no editable window')
+  local slot, slot_buf = wait_editor_slot()
   assert_eq(vim.api.nvim_buf_get_name(slot_buf), '', 'editor slot is not an empty buffer')
 
   -- The slot sits right of the sidebar column, not inside it.
@@ -526,17 +515,11 @@ elseif scenario == 'broken-open-repair' then
   -- The safety net: a file window that lands inside the sidebar column (how
   -- nvim-tree opens a file when no editable window exists) is moved out to
   -- the editor column.
-  dirty_repo()
-  open_tree(false)
-  sessions(1)
-  assert_(vim.wait(3000, function()
-    return U.window_with_filetype('claude-sessions-diff') ~= nil
-  end, 20), 'diff panel did not open')
+  open_diff_layout()
 
   -- Mimic nvim-tree's open_in_new_window fallback: split the TREE and show a
   -- named normal buffer in the new window.
-  local tw = U.window_with_filetype('NvimTree')
-  vim.api.nvim_set_current_win(tw)
+  vim.api.nvim_set_current_win(U.tree_window())
   vim.cmd('belowright vsplit')
   local broken = vim.api.nvim_get_current_win()
   local buf = vim.api.nvim_create_buf(true, false)
@@ -546,10 +529,7 @@ elseif scenario == 'broken-open-repair' then
 
   assert_(vim.wait(1000, function() return not vim.api.nvim_win_is_valid(broken) end, 20),
     'the broken file window was not repaired')
-  local file_win
-  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
-    if vim.api.nvim_win_get_buf(w) == buf then file_win = w end
-  end
+  local file_win = vim.fn.win_findbuf(buf)[1]
   assert_(file_win, 'the file buffer is not displayed after the repair')
   assert_(not U.sidebar_overlap(file_win), 'the file window still overlaps the sidebar')
   ok()
@@ -576,11 +556,9 @@ elseif scenario == 'width-normalize' then
   local side, ed, term = ws[1], ws[2], ws[3]
   -- Distinct buffers: vsplit windows share the buffer, and the filetypes
   -- must be per window.
-  local side_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[side_buf].filetype = 'NvimTree'
-  local term_buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[term_buf].filetype = 'claude'
-  local ed_buf = vim.api.nvim_create_buf(false, false)
+  local side_buf = U.scratch_buffer('NvimTree')
+  local term_buf = U.scratch_buffer('claude')
+  local ed_buf = U.empty_editor_buffer()
   vim.api.nvim_win_set_buf(side, side_buf)
   vim.api.nvim_win_set_buf(ed, ed_buf)
   vim.api.nvim_win_set_buf(term, term_buf)

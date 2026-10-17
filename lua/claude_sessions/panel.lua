@@ -437,7 +437,7 @@ local function install_mode_guard()
   -- Shared predicate: an insert the panels do not want — one landing on a
   -- read-only panel buffer while no rename is in flight (a rename's own
   -- insert is deliberate and passes).
-  local PANEL_FTS = { 'claude-sessions-panel', 'claude-sessions-diff' }
+  local PANEL_FTS = U.PANEL_FTS
   local function stray_insert(buf)
     if renaming then return false end
     local ft = vim.bo[buf].filetype

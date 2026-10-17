@@ -77,6 +77,35 @@ function U.split_below(anchor, height, buf, style)
   return win
 end
 
+-- The diff/session panel buffers that live in the tree's column.
+U.PANEL_FTS = { 'claude-sessions-diff', 'claude-sessions-panel' }
+
+-- Narrowest editor column left when fitting the terminal's width.
+local MIN_EDITOR_WIDTH = 10
+
+--- Is `buf` a sidebar buffer (the tree or one of its panels)?
+local function sidebar_ft(buf)
+  local ft = vim.bo[buf].filetype
+  return ft == 'NvimTree' or vim.tbl_contains(U.PANEL_FTS, ft)
+end
+
+--- Horizontal extent {left, right} of `win`, in screen columns.
+local function extent(win)
+  local left = vim.api.nvim_win_get_position(win)[2]
+  return left, left + vim.api.nvim_win_get_width(win) - 1
+end
+
+--- The horizontal extents of the sidebar windows in `wins`.
+local function sidebar_extents(wins)
+  local out = {}
+  for _, w in ipairs(wins) do
+    if sidebar_ft(vim.api.nvim_win_get_buf(w)) then
+      out[#out + 1] = { extent(w) }
+    end
+  end
+  return out
+end
+
 --- The displayed session terminal window, or nil. toggleterm may reset its
 --- filetype to 'toggleterm' for a moment, so the session marker counts too.
 function U.session_window()
@@ -90,36 +119,53 @@ function U.session_window()
 end
 
 --- A real window showing a normal (editable) buffer in its own column — what
---- nvim-tree opens files into — or nil. `except` skips one window (a broken
---- split being repaired); windows overlapping the sidebar don't count.
+--- nvim-tree opens files into — or nil. The largest wins (the pane's
+--- take-over preference); `except` skips one window (a broken split being
+--- repaired); windows overlapping the sidebar don't count.
 function U.editor_window(except)
-  for _, w in ipairs(U.real_windows()) do
+  local wins = U.real_windows()
+  local extents = sidebar_extents(wins)
+  local best, best_area
+  for _, w in ipairs(wins) do
     if w ~= except then
       local b = vim.api.nvim_win_get_buf(w)
-      if vim.bo[b].buftype == '' and not U.sidebar_overlap(w) then return w end
+      if vim.bo[b].buftype == '' then
+        local left, right = extent(w)
+        local broken = false
+        for _, e in ipairs(extents) do
+          if e[2] >= left and e[1] <= right then
+            broken = true
+            break
+          end
+        end
+        if not broken then
+          local area = vim.api.nvim_win_get_width(w) * vim.api.nvim_win_get_height(w)
+          if area > (best_area or -1) then
+            best, best_area = w, area
+          end
+        end
+      end
     end
   end
+  return best
 end
 
 --- Does `win` horizontally overlap a sidebar window? In a sane sessions
 --- layout the sidebar is its own column; overlap means nvim-tree split the
 --- TREE and dropped the file inside the sidebar column.
 function U.sidebar_overlap(win)
-  local p = vim.api.nvim_win_get_position(win)
-  local left, right = p[2], p[2] + vim.api.nvim_win_get_width(win) - 1
-  for _, w in ipairs(U.real_windows()) do
-    if w ~= win then
-      local ft = vim.bo[vim.api.nvim_win_get_buf(w)].filetype
-      if ft == 'NvimTree' or ft == 'claude-sessions-diff'
-          or ft == 'claude-sessions-panel' then
-        local pp = vim.api.nvim_win_get_position(w)
-        local pl = pp[2]
-        local pr = pl + vim.api.nvim_win_get_width(w) - 1
-        if pr >= left and pl <= right then return true end
-      end
-    end
+  local left, right = extent(win)
+  for _, e in ipairs(sidebar_extents(U.real_windows())) do
+    if e[2] >= left and e[1] <= right then return true end
   end
   return false
+end
+
+--- An empty, unlisted, self-wiping normal buffer — an editor slot.
+function U.empty_editor_buffer()
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.bo[buf].bufhidden = 'wipe'
+  return buf
 end
 
 --- Move the file in `win` — which landed inside the sidebar column — out to
@@ -129,17 +175,17 @@ function U.repair_editor_window(win)
   local buf = vim.api.nvim_win_get_buf(win)
   local cursor = vim.api.nvim_win_get_cursor(win)
   local target = U.ensure_editor_window(win)
-  if not (target and target ~= win and U.valid_win(target)) then return end
+  if not target then return end
   vim.api.nvim_win_set_buf(target, buf)
   pcall(vim.api.nvim_win_set_cursor, target, cursor)
   vim.api.nvim_set_current_win(target)
   pcall(vim.api.nvim_win_close, win, true)
-  U.normalize_columns()
+  U.normalize_columns() -- closing the bad split freed width
 end
 
 --- The configured width of a vertical session terminal (toggleterm's `size`,
 --- evaluated for the vertical direction), or nil when unknown.
-function U.terminal_width()
+local function terminal_width()
   local ok, cfg = pcall(require, 'toggleterm.config')
   if not ok then return nil end
   local ok2, size = pcall(cfg.get, 'size')
@@ -151,11 +197,8 @@ function U.terminal_width()
   return type(size) == 'number' and math.floor(size) or nil
 end
 
--- Narrowest editor column left when fitting the terminal's width.
-local MIN_EDITOR_WIDTH = 10
-
 --- nvim-tree's resolved sidebar width, or nil when unknown/adaptive.
-function U.tree_width()
+local function tree_width()
   local ok, vs = pcall(require, 'nvim-tree.view-state')
   if ok and vs.Active and not vs.Active.adaptive_size
       and type(vs.Active.initial_width) == 'number' then
@@ -167,25 +210,36 @@ end
 --- session terminal at its configured width, editor column takes the rest.
 --- nvim-tree and toggleterm both set 'winfixwidth', so Neovim hands a closed
 --- editor's width to one of them — the sidebar can balloon and the terminal
---- shrink. Called after every layout change the plugin drives. `slot` is the
---- editor-side window when it is not yet an editable one (the diff pane's
---- fallback split).
-function U.normalize_columns(slot)
+--- shrink. Runs after every layout change the plugin drives.
+function U.normalize_columns()
   local host = U.session_window()
   if not host then return end
   local tree = U.tree_window()
-  local side = U.tree_width()
+  local side = tree_width()
   if tree and side and vim.api.nvim_win_get_width(tree) ~= side then
     pcall(vim.api.nvim_win_set_width, tree, side)
   end
-  local term = U.terminal_width()
-  local ed = slot or U.editor_window()
+  local term = terminal_width()
+  local ed = U.editor_window()
   if not (term and ed) then return end
   local total = vim.api.nvim_win_get_width(host) + vim.api.nvim_win_get_width(ed)
   local target = math.min(term, total - MIN_EDITOR_WIDTH)
   if target >= MIN_EDITOR_WIDTH and target ~= vim.api.nvim_win_get_width(host) then
     pcall(vim.api.nvim_win_set_width, host, target)
   end
+end
+
+-- Coalesce the normalizations a batch window close would queue.
+local normalize_pending = false
+
+--- Normalize on the next event-loop pass, at most once per batch.
+function U.schedule_normalize()
+  if normalize_pending then return end
+  normalize_pending = true
+  vim.schedule(function()
+    normalize_pending = false
+    U.normalize_columns()
+  end)
 end
 
 --- The editable window, creating an empty one in the column left of the
@@ -199,27 +253,24 @@ function U.ensure_editor_window(except)
     return win
   end
   -- A real session window, never the zoom float: splitting from a float
-  -- lands a degenerate full-width window.
+  -- lands a degenerate full-width window. `vnew` gives the split an empty
+  -- buffer directly, so the terminal is never shown in two windows.
   local host = U.session_window()
   if not host then return nil end
-  -- Split off an empty buffer, never the terminal itself: a second window on
-  -- a terminal fights it over the pty size.
-  local host_buf = vim.api.nvim_win_get_buf(host)
-  local buf = vim.api.nvim_create_buf(false, false)
-  vim.bo[buf].bufhidden = 'wipe'
   local prev = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(host, buf)
   local splitright = vim.o.splitright
   vim.o.splitright = false
   U.focus(host)
-  local ok = pcall(vim.cmd, 'vsplit')
+  local ok = pcall(vim.cmd, 'vnew')
   vim.o.splitright = splitright
-  win = ok and vim.api.nvim_get_current_win() or nil
-  vim.api.nvim_win_set_buf(host, host_buf) -- the terminal goes straight back
-  if not win or win == host then
+  if not ok or vim.api.nvim_get_current_win() == host then
     U.focus(prev, host)
     return nil
   end
+  win = vim.api.nvim_get_current_win()
+  local buf = vim.api.nvim_get_current_buf()
+  vim.bo[buf].buflisted = false
+  vim.bo[buf].bufhidden = 'wipe'
   U.normalize_columns()
   U.focus(prev, win)
   return win
