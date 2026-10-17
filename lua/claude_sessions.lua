@@ -1198,8 +1198,31 @@ function M.setup(user_opts)
         if not tw then return end
         panel.open() -- refreshes when already up
         diff.open() -- no-op when already up; probes the workspace
+        U.ensure_editor_window() -- files opened from here need a target
         U.focus(tw) -- hand focus back to the tree just opened
       end)
+    end,
+  })
+
+  -- Safety net: with no editable window on screen, nvim-tree opens a file by
+  -- splitting the current window — from the tree that lands the file INSIDE
+  -- the sidebar column (the panels then span across the editor area). Move
+  -- such a window out to the editor column, however it got there.
+  vim.api.nvim_create_autocmd('BufWinEnter', {
+    callback = function(ev)
+      if vim.bo[ev.buf].buftype ~= '' then return end
+      if vim.api.nvim_buf_get_name(ev.buf) == '' then return end
+      if not M.is_visible() then return end
+      for _, w in ipairs(U.real_windows()) do
+        if vim.api.nvim_win_get_buf(w) == ev.buf and U.sidebar_overlap(w) then
+          vim.schedule(function()
+            if U.valid_win(w) and vim.api.nvim_win_get_buf(w) == ev.buf then
+              U.repair_editor_window(w)
+            end
+          end)
+          return
+        end
+      end
     end,
   })
 

@@ -563,7 +563,12 @@ local function open_split(root, tw)
   vim.api.nvim_create_autocmd('WinClosed', {
     buffer = buf,
     callback = function()
-      if M.buf == buf then M.close() end
+      if M.buf ~= buf then return end
+      M.close()
+      -- Closed from outside (q, :close): keep an editable window in the
+      -- layout, or nvim-tree's next file open splits the TREE and lands
+      -- inside the sidebar column.
+      vim.schedule(U.ensure_editor_window)
     end,
   })
 end

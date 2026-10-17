@@ -77,6 +77,132 @@ function U.split_below(anchor, height, buf, style)
   return win
 end
 
+--- The displayed session terminal window, or nil. toggleterm may reset its
+--- filetype to 'toggleterm' for a moment, so the session marker counts too.
+function U.session_window()
+  for _, w in ipairs(U.real_windows()) do
+    local b = vim.api.nvim_win_get_buf(w)
+    local ft = vim.bo[b].filetype
+    if ft == 'claude' or (ft == 'toggleterm' and vim.b[b].claude_session_name) then
+      return w
+    end
+  end
+end
+
+--- A real window showing a normal (editable) buffer in its own column — what
+--- nvim-tree opens files into — or nil. `except` skips one window (a broken
+--- split being repaired); windows overlapping the sidebar don't count.
+function U.editor_window(except)
+  for _, w in ipairs(U.real_windows()) do
+    if w ~= except then
+      local b = vim.api.nvim_win_get_buf(w)
+      if vim.bo[b].buftype == '' and not U.sidebar_overlap(w) then return w end
+    end
+  end
+end
+
+--- Does `win` horizontally overlap a sidebar window? In a sane sessions
+--- layout the sidebar is its own column; overlap means nvim-tree split the
+--- TREE and dropped the file inside the sidebar column.
+function U.sidebar_overlap(win)
+  local p = vim.api.nvim_win_get_position(win)
+  local left, right = p[2], p[2] + vim.api.nvim_win_get_width(win) - 1
+  for _, w in ipairs(U.real_windows()) do
+    if w ~= win then
+      local ft = vim.bo[vim.api.nvim_win_get_buf(w)].filetype
+      if ft == 'NvimTree' or ft == 'claude-sessions-diff'
+          or ft == 'claude-sessions-panel' then
+        local pp = vim.api.nvim_win_get_position(w)
+        local pl = pp[2]
+        local pr = pl + vim.api.nvim_win_get_width(w) - 1
+        if pr >= left and pl <= right then return true end
+      end
+    end
+  end
+  return false
+end
+
+--- Move the file in `win` — which landed inside the sidebar column — out to
+--- an editor window left of the session terminal.
+function U.repair_editor_window(win)
+  if not U.valid_win(win) then return end
+  local buf = vim.api.nvim_win_get_buf(win)
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local target = U.ensure_editor_window(win)
+  if not (target and target ~= win and U.valid_win(target)) then return end
+  vim.api.nvim_win_set_buf(target, buf)
+  pcall(vim.api.nvim_win_set_cursor, target, cursor)
+  vim.api.nvim_set_current_win(target)
+  pcall(vim.api.nvim_win_close, win, true)
+  local host = U.session_window()
+  if host then U.fit_terminal_width(host, target) end
+end
+
+--- The configured width of a vertical session terminal (toggleterm's `size`,
+--- evaluated for the vertical direction), or nil when unknown.
+function U.terminal_width()
+  local ok, cfg = pcall(require, 'toggleterm.config')
+  if not ok then return nil end
+  local ok2, size = pcall(cfg.get, 'size')
+  if not ok2 then return nil end
+  if type(size) == 'function' then
+    local ok3, value = pcall(size, { direction = 'vertical' })
+    size = ok3 and value or nil
+  end
+  return type(size) == 'number' and math.floor(size) or nil
+end
+
+-- Narrowest editor column left when fitting the terminal's width.
+local MIN_EDITOR_WIDTH = 10
+
+--- Fit the session terminal to its configured width inside the space it and
+--- `slot` share, leaving the slot the remainder. The terminal never shrinks
+--- below its current width, and the slot never below MIN_EDITOR_WIDTH.
+function U.fit_terminal_width(host, slot)
+  local term = U.terminal_width()
+  if not (term and U.valid_win(host) and U.valid_win(slot)) then return end
+  local total = vim.api.nvim_win_get_width(host) + vim.api.nvim_win_get_width(slot)
+  local target = math.max(vim.api.nvim_win_get_width(host),
+    math.min(term, total - MIN_EDITOR_WIDTH))
+  if target < total then
+    pcall(vim.api.nvim_win_set_width, host, target)
+  end
+end
+
+--- The editable window, creating an empty one in the column left of the
+--- session terminal when the layout has none (the sessions layout's editor
+--- column). Without it nvim-tree's next file open splits the TREE window and
+--- lands inside the sidebar column. nil without a terminal to anchor on.
+function U.ensure_editor_window(except)
+  local win = U.editor_window(except)
+  if win then return win end
+  -- A real session window, never the zoom float: splitting from a float
+  -- lands a degenerate full-width window.
+  local host = U.session_window()
+  if not host then return nil end
+  -- Split off an empty buffer, never the terminal itself: a second window on
+  -- a terminal fights it over the pty size.
+  local host_buf = vim.api.nvim_win_get_buf(host)
+  local buf = vim.api.nvim_create_buf(false, false)
+  vim.bo[buf].bufhidden = 'wipe'
+  local prev = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(host, buf)
+  local splitright = vim.o.splitright
+  vim.o.splitright = false
+  U.focus(host)
+  local ok = pcall(vim.cmd, 'vsplit')
+  vim.o.splitright = splitright
+  win = ok and vim.api.nvim_get_current_win() or nil
+  vim.api.nvim_win_set_buf(host, host_buf) -- the terminal goes straight back
+  if win and win ~= host then U.fit_terminal_width(host, win) end
+  if not win or win == host then
+    U.focus(prev, host)
+    return nil
+  end
+  U.focus(prev, win)
+  return win
+end
+
 --- `msg` under the 'claude sessions' title, at `level` (INFO when none).
 function U.notify(msg, level)
   vim.notify(msg, level or vim.log.levels.INFO, { title = 'claude sessions' })

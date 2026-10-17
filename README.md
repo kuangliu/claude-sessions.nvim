@@ -99,7 +99,12 @@ stays until the sessions layout goes away, the workspace goes clean, or you pres
 the pane itself. The diff takes over the editor window: your file steps aside
 (cursor and window options remembered) and comes back when the pane exits;
 with nothing but the sessions layout on screen the pane splits beside the
-terminal instead. Soft dependency: without diffview installed the panel still tracks
+terminal instead. The layout always keeps an editable window: when the pane
+or the changed-files list goes away without one, an empty editor slot is
+created in the column left of the terminal, so files opened from nvim-tree
+land there instead of splitting the tree inside the sidebar column. The
+session terminal keeps its configured width throughout; the editor column
+takes the remainder. Soft dependency: without diffview installed the panel still tracks
 changes and moves the selection — just with no right-side diff.
 
 The diff panel follows the tree like the session panel: closing nvim-tree
