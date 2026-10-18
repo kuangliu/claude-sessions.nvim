@@ -77,16 +77,30 @@ function U.split_below(anchor, height, buf, style)
   return win
 end
 
--- The diff/session panel buffers that live in the tree's column.
-U.PANEL_FTS = { 'claude-sessions-diff', 'claude-sessions-panel' }
+-- The sidebar's stack, top to bottom: nvim-tree, the changed-files panel,
+-- the session list. Anchors and calibration follow this order however the
+-- windows are (re)opened.
+local SIDEBAR_FTS = { 'NvimTree', 'claude-sessions-diff', 'claude-sessions-panel' }
+
+-- The panel buffers that live in the tree's column (the stack's tail).
+U.PANEL_FTS = { SIDEBAR_FTS[2], SIDEBAR_FTS[3] }
 
 -- Narrowest editor column left when fitting the terminal's width.
 local MIN_EDITOR_WIDTH = 10
 
+--- The live sidebar stack, top-down — windows not up are skipped.
+function U.sidebar_windows()
+  local wins = {}
+  for _, ft in ipairs(SIDEBAR_FTS) do
+    local w = U.window_with_filetype(ft)
+    if w then wins[#wins + 1] = w end
+  end
+  return wins
+end
+
 --- Is `buf` a sidebar buffer (the tree or one of its panels)?
 local function sidebar_ft(buf)
-  local ft = vim.bo[buf].filetype
-  return ft == 'NvimTree' or vim.tbl_contains(U.PANEL_FTS, ft)
+  return vim.tbl_contains(SIDEBAR_FTS, vim.bo[buf].filetype)
 end
 
 --- Horizontal extent {left, right} of `win`, in screen columns.
@@ -372,6 +386,7 @@ end
 
 --- Calibrate the sidebar stack (tree + panels below it) to thirds: every
 --- window but the first takes floor(rows/3); the tree takes the remainder.
+--- `wins` is the stack top-down — U.sidebar_windows() is the usual spelling.
 --- Rows are read from the stack itself (o.lines can disagree with it after
 --- cmdline/frame churn). win_set_height redistributes within the stack
 --- (nearest neighbour pays first), so the assertion is ITERATED until exact,
@@ -379,9 +394,9 @@ end
 --- window to the bottom of the full-width FRAME, not its own column, which
 --- wrecks the layout. Windows not up are skipped; their own open()
 --- calibrates the full stack.
-function U.calibrate_sidebar(...)
+function U.calibrate_sidebar(wins)
   local up = {}
-  for _, w in ipairs({ ... }) do
+  for _, w in ipairs(wins or {}) do
     if U.valid_win(w) then up[#up + 1] = w end
   end
   if #up == 0 then return end

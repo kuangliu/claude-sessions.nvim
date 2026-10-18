@@ -147,8 +147,8 @@ local function poll_tick()
   -- Panel mode guard's periodic check (see panel.install_mode_guard).
   vim.cmd('doautocmd User ClaudeSessionsTick')
   -- The diff panel repaints per tick WHILE an agent works (an idle tree is
-  -- static), slow-cycle otherwise; down → probe+open on the slow sub-cycle,
-  -- so a never-drawn panel still appears when the first change lands.
+  -- static), slow-cycle otherwise; a dismissed panel is reopened on the slow
+  -- sub-cycle.
   if M.is_visible() then
     if diff.active() then
       if any_busy or tick % FETCH_EVERY == 0 then diff.refresh() end
@@ -825,27 +825,30 @@ end
 -- unlike bare digits they never collide with count prefixes or a global
 -- digit mapping.
 
-local JUMP_TARGETS = { 'tree', 'file panel', 'session' }
-
---- The window <C-n> addresses, or nil when it is not up.
-local function digit_window(n)
-  if n == 1 then return U.tree_window() end
-  if n == 2 then
-    -- The file (editor) column; a diff pane that took the column over is
-    -- its current occupant (the pane's nofile buffer is no editor_window).
-    return U.editor_window() or (diff_view.active() and diff_view.win or nil)
-  end
-  -- The session column: the zoom float while zoomed (the float IS the
-  -- display then, and the split is gone).
-  return zoomed() and zoom_win or U.session_window()
-end
+--- The jump targets in column order: a name (map desc and missing-window
+--- notice) and the window resolver. The file column's occupant can be the
+--- diff pane — its nofile buffer is no editor_window, but it still holds the
+--- column.
+local JUMPS = {
+  { name = 'tree', win = U.tree_window },
+  {
+    name = 'file column',
+    win = function() return U.editor_window() or diff_view.win end,
+  },
+  {
+    name = 'session',
+    -- The float IS the display while zoomed (the session split is gone).
+    win = function() return zoomed() and zoom_win or U.session_window() end,
+  },
+}
 
 --- Focus <C-n>'s window. A no-op outside the sessions layout.
 local function jump_to(n)
+  local jump = JUMPS[n]
   if not M.is_visible() then return end
-  local target = digit_window(n)
+  local target = jump.win()
   if not U.valid_win(target) then
-    notify(('No %s window.'):format(JUMP_TARGETS[n]), vim.log.levels.WARN)
+    notify(('No %s window.'):format(jump.name), vim.log.levels.WARN)
     return
   end
   -- The float covers the layout: jumping elsewhere means leaving it. The
@@ -1158,11 +1161,11 @@ function M.setup(user_opts)
     { noremap = true, silent = true, desc = 'Toggle shell below the session' })
   vim.keymap.set({ 'n', 't' }, '<C-space>', function() M.toggle_zoom() end,
     { noremap = true, silent = true, desc = 'Zoom session/shell fullscreen' })
-  -- <C-1>..<C-3> jump to the tree, the diff panel and the session.
-  for n = 1, 3 do
+  -- <C-1>..<C-3> jump to the layout's three columns.
+  for n, jump in ipairs(JUMPS) do
     vim.keymap.set({ 'n', 't' }, '<C-' .. n .. '>', function() jump_to(n) end,
       { noremap = true, silent = true,
-        desc = 'claude sessions: focus ' .. JUMP_TARGETS[n] })
+        desc = 'claude sessions: focus ' .. jump.name })
   end
 
   -- Remember manually closed session windows (e.g. :close, <C-w>c) for <C-s>
@@ -1245,7 +1248,7 @@ function M.setup(user_opts)
         local tw = U.tree_window()
         if not tw then return end
         panel.open() -- refreshes when already up
-        diff.open() -- no-op when already up; probes the workspace
+        diff.open() -- no-op when already up; opens even on a clean tree
         U.ensure_editor_window() -- files opened from here need a target
         U.focus(tw) -- hand focus back to the tree just opened
       end)

@@ -155,22 +155,35 @@ local function clean_repo()
   return repo
 end
 
+-- Mark the fixture dirty: one extra line in f.txt.
+local function dirty_file(repo)
+  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
+end
+
 -- The same repo with one uncommitted change — the diff panel's rows.
 local function dirty_repo()
   local repo = clean_repo()
-  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
+  dirty_file(repo)
   return repo
 end
 
--- The sessions layout with a dirty workspace and both panels rendered.
-local function open_diff_layout()
-  dirty_repo()
+-- The sessions layout over a fresh repo (`clean` or dirty), the tree, and
+-- both panels attached. Returns the diff module and the repo.
+local function open_layout(count, clean)
+  local repo = clean and clean_repo() or dirty_repo()
   open_tree(false)
-  sessions(1)
+  sessions(count or 1)
   local diff = require('claude_sessions.diff')
+  assert_(vim.wait(3000, function() return diff.active() end, 20),
+    'the diff panel did not open')
+  return diff, repo
+end
+
+-- The layout with rendered rows (a dirty workspace).
+local function open_diff_layout(count)
+  local diff = open_layout(count)
   assert_(vim.wait(3000, function()
-    return diff.active()
-      and (vim.api.nvim_buf_get_lines(diff.buf, 0, 1, false)[1] or '') ~= ''
+    return (vim.api.nvim_buf_get_lines(diff.buf, 0, 1, false)[1] or '') ~= ''
   end, 20), 'diff panel did not render rows')
   return diff
 end
@@ -421,12 +434,7 @@ elseif scenario == 'panel-smoke' then
 elseif scenario == 'panel-digits' then
   -- <C-1>..<C-3> jump to the columns: nvim-tree, the file (editor) column,
   -- and the claude session column — not the changed-files list.
-  dirty_repo()
-  open_tree(false)
-  sessions(2)
-  local diff = require('claude_sessions.diff')
-  assert_(vim.wait(3000, function() return diff.active() end, 20),
-    'the diff panel did not open')
+  local diff = open_layout(2)
   vim.wait(200) -- let the tree-open's scheduled hand-back settle
   local tree = U.tree_window()
   local editor = U.editor_window()
@@ -457,14 +465,9 @@ elseif scenario == 'panel-digits' then
 elseif scenario == 'panel-order' then
   -- The sidebar stack stays tree / diff list / session list top-down even
   -- when the session panel reopens while the diff panel is already up.
-  dirty_repo()
-  open_tree(false)
-  sessions(2)
-  local diff = require('claude_sessions.diff')
+  open_layout(2)
   local panel = require('claude_sessions.panel')
-  assert_(vim.wait(3000, function()
-    return diff.active() and U.window_with_filetype('claude-sessions-panel')
-  end, 20), 'panels did not attach below the tree')
+  assert_(U.window_with_filetype('claude-sessions-panel'), 'the session panel is missing')
   local tree = U.tree_window()
   panel.close() -- q on the session panel; the diff list stays up
   assert_(not U.window_with_filetype('claude-sessions-panel'), 'the session panel did not close')
@@ -535,10 +538,7 @@ elseif scenario == 'diff-clean-panel' then
   -- The diff panel is part of the sidebar stack even on a clean workspace
   -- (a placeholder row), and it follows the workspace back to dirty and
   -- clean without ever leaving the stack.
-  local repo = clean_repo()
-  open_tree(false)
-  sessions(1)
-  local diff = require('claude_sessions.diff')
+  local diff, repo = open_layout(1, true)
   local function panel_text()
     return table.concat(vim.api.nvim_buf_get_lines(diff.buf, 0, -1, false), '\n')
   end
@@ -550,7 +550,7 @@ elseif scenario == 'diff-clean-panel' then
   assert_(U.window_with_filetype('claude-sessions-panel'), 'the session panel is missing')
 
   -- A change lands: rows replace the placeholder.
-  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
+  dirty_file(repo)
   assert_(vim.wait(5000, function()
     return panel_text():find('f.txt', 1, true) ~= nil
   end, 20), 'the panel did not pick up the first change')
