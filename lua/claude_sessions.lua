@@ -7,9 +7,10 @@
 -- botright vsplit + vertical resize path.
 --
 -- While a session window is displayed, a session-list panel is split below
--- nvim-tree, styled after Claude Code's session picker (panel.lua), and —
--- when the workspace is dirty — a changed-files diff panel between the two
--- (diff.lua), whose selection renders the file's diff in a right-side pane
+-- nvim-tree, styled after Claude Code's session picker (panel.lua), and a
+-- changed-files diff panel sits between the two (diff.lua) — kept up even on
+-- a clean workspace (a placeholder row), so the sidebar stack never changes
+-- shape. Selecting a file renders its diff in a right-side pane
 -- (diff_view.lua).
 --
 -- Keymaps:

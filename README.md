@@ -65,10 +65,12 @@ last displayed session closes.
 
 ## Diff panel
 
-While a session window is displayed and the workspace has uncommitted changes,
-a diff panel is split above the session panel (below nvim-tree): one three-line
-entry per changed file — the basename, the `+`/`-` counts with a proportional
-bar of blocks (untracked files show `??` in yellow), a blank separator. `j/k`
+While a session window is displayed, a diff panel is split above the session
+panel (below nvim-tree): one three-line entry per changed file — the basename,
+the `+`/`-` counts with a proportional bar of blocks (untracked files show `??`
+in yellow), a blank separator. A clean workspace keeps the panel in place with
+a dim `No uncommitted changes` placeholder row, so the sidebar's stack never
+changes shape. `j/k`
 (or `<Down>/<Up>`) move the cursor; the file landed on draws the selection
 block, and the selection is **pinned** — it holds when the cursor moves out of
 the panel, so the review keeps running while you read or work elsewhere.
@@ -77,7 +79,8 @@ onto it (its `]]`/`[[`/`<CR>`/`d`/`u`/`D`/`c`/`q` take over). `<C-d>` discards
 all uncommitted changes of the file under the cursor after a `y/N` prompt: a
 tracked file resets to HEAD (staged and unstaged together, the numbers the row
 shows), an untracked one is deleted, and a rename's old name is restored along
-with it. The rows re-probe afterwards; a clean workspace takes the panel down.
+with it. The rows re-probe afterwards; a clean workspace leaves the panel up
+with its placeholder row.
 `<C-e>` — global, the way `<C-s>` cycles sessions — focuses the panel
 and selects a changed file: the FIRST press starts the sweep at the first
 file, and every press after advances from the selection and wraps back past

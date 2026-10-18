@@ -21,7 +21,7 @@ local root = vim.fs.dirname(vim.fs.dirname(here))
 vim.opt.runtimepath:append(root)
 
 -- A non-git temp cwd: the diff panel's `git rev-parse` probe must not find
--- a repo (or a workspace), so no diff panel ever splits.
+-- a repo, so no diff panel ever splits.
 local tmp = vim.fn.tempname()
 vim.fn.mkdir(tmp, 'p')
 vim.fn.chdir(tmp)
@@ -140,9 +140,9 @@ local function open_tree(ft_first)
   return buf
 end
 
--- A temp git repo with one committed file and one uncommitted change — the
--- diff panel needs a dirty workspace to split.
-local function dirty_repo()
+-- A temp git repo with one committed file and a clean working tree — the
+-- diff panel still splits, with its placeholder row.
+local function clean_repo()
   local repo = vim.fn.tempname()
   vim.fn.mkdir(repo, 'p')
   vim.fn.system({ 'git', '-C', repo, 'init', '-q' })
@@ -151,8 +151,15 @@ local function dirty_repo()
   vim.fn.system({
     'git', '-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init',
   })
-  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
   vim.fn.chdir(repo)
+  return repo
+end
+
+-- The same repo with one uncommitted change — the diff panel's rows.
+local function dirty_repo()
+  local repo = clean_repo()
+  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
+  return repo
 end
 
 -- The sessions layout with a dirty workspace and both panels rendered.
@@ -461,6 +468,37 @@ elseif scenario == 'tree-toggle' then
   require('claude_sessions.diff').close()
   assert_eq(pane_closes, 1, 'a plain panel close no longer closes the diff pane')
   diff_view.close = real_close
+  ok()
+
+elseif scenario == 'diff-clean-panel' then
+  -- The diff panel is part of the sidebar stack even on a clean workspace
+  -- (a placeholder row), and it follows the workspace back to dirty and
+  -- clean without ever leaving the stack.
+  local repo = clean_repo()
+  open_tree(false)
+  sessions(1)
+  local diff = require('claude_sessions.diff')
+  local function panel_text()
+    return table.concat(vim.api.nvim_buf_get_lines(diff.buf, 0, -1, false), '\n')
+  end
+  assert_(vim.wait(3000, function() return diff.active() end, 20),
+    'the diff panel did not open on a clean workspace')
+  assert_(vim.wait(3000, function()
+    return panel_text():find('No uncommitted changes', 1, true) ~= nil
+  end, 20), 'the clean panel did not render its placeholder')
+  assert_(U.window_with_filetype('claude-sessions-panel'), 'the session panel is missing')
+
+  -- A change lands: rows replace the placeholder.
+  vim.fn.writefile({ 'one', 'two' }, repo .. '/f.txt')
+  assert_(vim.wait(5000, function()
+    return panel_text():find('f.txt', 1, true) ~= nil
+  end, 20), 'the panel did not pick up the first change')
+
+  -- Clean again: the panel stays up and the placeholder comes back.
+  vim.fn.system({ 'git', '-C', repo, 'checkout', '--', 'f.txt' })
+  assert_(vim.wait(5000, function()
+    return diff.active() and panel_text():find('No uncommitted changes', 1, true) ~= nil
+  end, 20), 'the panel dropped or kept stale rows when the workspace went clean')
   ok()
 
 elseif scenario == 'pane-close-slot' then

@@ -6,8 +6,9 @@
 --
 -- Lifecycle mirrors the session panel: up while a session window is displayed
 -- and a tree window exists; closed when the tree or the last displayed session
--- closes. A CLEAN workspace draws no panel at all (open() probes before
--- splitting; a clean refresh closes it again).
+-- closes. The panel stays up on a CLEAN workspace too — one dim placeholder
+-- row in place of the file list — so the sidebar's three-window stack (tree,
+-- diff list, session list) never changes shape.
 --
 -- Selection is a PIN, not focus: the entry last landed on (an explicit j/k or
 -- <C-e>, or a focus arrival) draws the block background and renders its
@@ -27,6 +28,7 @@ local ns = vim.api.nvim_create_namespace('claude_sessions_diff')
 local ADD_HL = 'ClaudeSessionsDiffAdd'
 local DEL_HL = 'ClaudeSessionsDiffDel'
 local UNTR_HL = 'ClaudeSessionsDiffUntracked'
+local CLEAN_HL = 'ClaudeSessionsDiffClean'
 -- The selected entry's two-line block background: the session panel's group
 -- (a faint read on top of the normal background), so the two panels read as
 -- one system.
@@ -40,14 +42,20 @@ local BAR_BLOCKS = 12 -- blocks in a full-width bar
 local BAR_BLOCK = '▪' -- single display column, 3 bytes (count columns, not bytes)
 
 -- Both rendered rows share the same one-space + indent prefix, so they align
--- at column `1 + #RENDER_INDENT` — the offset every counts/bar mark assumes.
+-- at column `#ROW_PREFIX` — the offset every counts/bar mark assumes.
 local RENDER_INDENT = '  '
+local ROW_PREFIX = ' ' .. RENDER_INDENT
+
+-- The clean workspace's stand-in row: the panel never goes away while a
+-- session is displayed (the sidebar keeps its shape), so an empty list needs
+-- something to show.
+local CLEAN_TEXT = 'No uncommitted changes'
 
 local in_flight = false -- a refresh's two probes are running; don't queue more
 
 -- A split in flight: open() latches it synchronously so two open() calls one
 -- settle queues don't BOTH split (see M.open). Declared here, ABOVE
--- open_split/open_probe — Lua locals aren't visible before their declaration;
+-- open_split/open_root — Lua locals aren't visible before their declaration;
 -- below them these writes would bind to a global and the latch would never
 -- clear (the panel would never reopen).
 local opening = false
@@ -139,12 +147,11 @@ local function fetch_numstat(root, cb)
 end
 
 --- All porcelain status rows of `root`, one string per line, or nil on
---- failure. Shared by open()'s clean-workspace probe and refresh()'s
---- untracked probe. `untracked` is git's own mode: the probe only asks "is
---- anything dirty", so 'normal' (which short-circuits at the directory level)
---- is enough there, while the row fetch needs 'all'.
-local function fetch_status(root, cb, untracked)
-  git(root, { 'status', '--porcelain', '--untracked-files=' .. (untracked or 'all') }, function(out)
+--- failure. Shared by refresh()'s untracked probe and classify_file()'s
+--- discard scan. Always 'all': untracked rows are listed per file, never
+--- collapsed to a directory entry.
+local function fetch_status(root, cb)
+  git(root, { 'status', '--porcelain', '--untracked-files=all' }, function(out)
     cb(split_lines(out))
   end)
 end
@@ -153,6 +160,7 @@ local function define_highlights()
   vim.api.nvim_set_hl(0, ADD_HL, { fg = '#98c379' }) -- added: green
   vim.api.nvim_set_hl(0, DEL_HL, { fg = '#e06c75' }) -- removed: red
   vim.api.nvim_set_hl(0, UNTR_HL, { fg = '#e5c07b' }) -- untracked: yellow
+  vim.api.nvim_set_hl(0, CLEAN_HL, { fg = '#5c6370' }) -- clean: dim placeholder
 end
 
 --- The bar for a file: `g` green blocks then `r` red ones, sized by the change
@@ -167,16 +175,30 @@ local function bar(add, del)
   return string.rep(BAR_BLOCK, g), string.rep(BAR_BLOCK, n - g)
 end
 
+--- The clean workspace's panel content: one dim placeholder row. Shares the
+--- skip-identical state with render() — the placeholder text can never equal
+--- a file list's rows, so a dirty<->clean flip always repaints.
+local function render_clean()
+  local text = ROW_PREFIX .. CLEAN_TEXT
+  if text == last_text and last_row == nil then return end
+  last_text, last_row = text, nil
+  U.set_rows(M.buf, ns, { text }, {
+    { lnum = 0, col = #ROW_PREFIX, end_col = #text, hl = CLEAN_HL },
+  })
+end
+
 --- Render the files as three rows per entry, the selected entry's two rows
 --- padded full-width so its block background spans them. Extmark columns are
---- BYTE offsets; the pad arithmetic is display-column count.
+--- BYTE offsets; the pad arithmetic is display-column count. An empty list
+--- (last_files after a clean refresh) keeps the placeholder up.
 local function render(files)
+  if #files == 0 then return render_clean() end
   local lines, marks = {}, {}
   -- The block follows the raw cursor through focus flips (the pin), but the
   -- flag gate means no selection before the sweep starts — birth state spells
   -- no block and no pane.
   local row = cursor_row()
-  local COUNTS_COL = 1 + #RENDER_INDENT -- the leading ' ' + indent both rows share
+  local COUNTS_COL = #ROW_PREFIX -- the leading ' ' + indent both rows share
   local width = M.active() and vim.api.nvim_win_get_width(M.win) or 80
   for i, f in ipairs(files) do
     local name_lnum = U.entry_line(i) - 1 -- 0-based name row; the counts row is that + 1
@@ -184,12 +206,12 @@ local function render(files)
     -- First row: the file's NAME only (the basename), indented like the
     -- counts below it. Default text color; no extmark.
     local name = basename(f.path)
-    lines[#lines + 1] = ' ' .. RENDER_INDENT .. name
+    lines[#lines + 1] = ROW_PREFIX .. name
     -- Second row: the counts and the bar, indented under the name.
     local add_str = ('+%d'):format(f.add or 0)
     local del_str = ('-%d'):format(f.del or 0)
     local counts = f.untracked and '??' or (add_str .. ' ' .. del_str)
-    lines[#lines + 1] = ' ' .. RENDER_INDENT .. counts
+    lines[#lines + 1] = ROW_PREFIX .. counts
     if f.untracked then
       marks[#marks + 1] = {
         lnum = counts_lnum, col = COUNTS_COL, end_col = COUNTS_COL + 2, hl = UNTR_HL,
@@ -284,7 +306,12 @@ function M.step_next()
     U.notify('No diff panel: nothing to step through.', vim.log.levels.WARN)
     return
   end
-  if U.entry_count(vim.api.nvim_buf_line_count(M.buf)) == 1 then
+  local n = U.entry_count(vim.api.nvim_buf_line_count(M.buf))
+  if n == 0 then -- the clean workspace's placeholder row
+    U.notify('No changed files to step through.', vim.log.levels.WARN)
+    return
+  end
+  if n == 1 then
     if diff_view.active() then
       diff_view.close()
     else
@@ -459,10 +486,11 @@ local function set_keymaps(buf)
   U.map_key(buf, '<C-d>', discard_current, 'discard file changes')
 end
 
---- Fetch the current diff and repaint. A refresh that finds no changes
---- closes the panel (the workspace went clean). One refresh runs at a time —
---- queuing more would land stale rows out of order. `then_` runs after a
---- join that rendered rows, never after the clean close.
+--- Fetch the current diff and repaint. A refresh that finds no changes keeps
+--- the panel up and renders the placeholder row (the sidebar stack never
+--- changes shape). One refresh runs at a time — queuing more would land
+--- stale rows out of order. `then_` runs after a join that rendered (rows or
+--- placeholder).
 function M.refresh(then_)
   if not (M.active() and panel_root and not in_flight) then return end
   in_flight = true
@@ -479,8 +507,11 @@ function M.refresh(then_)
       if path then files[#files + 1] = { path = path, untracked = true } end
     end
     if #files == 0 then
-      M.close() -- workspace went clean: drop the panel
-      return
+      -- Clean workspace: keep the panel (it is part of the sidebar stack),
+      -- take down a review pane with nothing left to show, and end the sweep
+      -- — the selection died with the list.
+      review_started = false
+      diff_view.close()
     end
     last_files = files -- land/focus_panel's repaints replay these
     render(files)
@@ -526,11 +557,12 @@ function M.close(keep_pane)
   end
 end
 
---- The split itself (root and tree window known, workspace dirty). Runs
---- inside the status job's callback (scheduled).
+--- The split itself (root and tree window known). Runs from open()'s cached
+--- path synchronously, else inside the rev-parse job's callback (scheduled).
 local function open_split(root, tw)
-  -- The tree can close while the probes are in flight (toggling the sidebar
-  -- closes the panels): no anchor, no panel — never split below a dead one.
+  -- The tree can close while the root probe is in flight (toggling the
+  -- sidebar closes the panels): no anchor, no panel — never split below a
+  -- dead one.
   if not U.valid_win(tw) then
     opening = false
     return
@@ -573,9 +605,11 @@ local function open_split(root, tw)
   })
 end
 
---- The split decision: the root is known, the workspace probe decides.
---- `opening` holds through here — cleared on every path below.
-local function open_probe(root)
+--- The split decision: the root is known. The workspace's cleanliness does
+--- not decide — a clean tree opens too and renders the placeholder row, so
+--- the sidebar stack is stable from the first session on. `opening` holds
+--- through here — cleared on every path below.
+local function open_root(root)
   if not root then -- no repo, nothing to show
     opening = false
     return
@@ -586,20 +620,13 @@ local function open_probe(root)
     opening = false
     return
   end
-  -- A clean workspace draws no diff panel: probe before splitting.
-  fetch_status(root, function(rows)
-    if #(rows or {}) == 0 then
-      opening = false -- clean workspace: no diff panel
-      return
-    end
-    open_split(root, tw)
-  end, 'normal')
+  open_split(root, tw)
 end
 
---- (Re)open the panel below the tree window. No-op without a tree, a git
---- repo, or workspace changes — each open() re-runs the status probe, so the
---- panel appears the moment the first change lands. Already open (or a split
---- in flight, `opening`) → no-op: refresh owns the rows.
+--- (Re)open the panel below the tree window. No-op without a tree or a git
+--- repo; a clean workspace opens too — refresh() renders the placeholder row
+--- until the first change lands. Already open (or a split in flight,
+--- `opening`) → no-op: refresh owns the rows.
 -- The repo root, cached per cwd (a `cd` is the only invalidation).
 local cached_root, cached_cwd = nil, nil
 function M.open()
@@ -609,13 +636,13 @@ function M.open()
   opening = true
   local cwd = U.uv.cwd()
   if cached_cwd == cwd then
-    open_probe(cached_root)
+    open_root(cached_root)
     return
   end
   git(cwd, { 'rev-parse', '--show-toplevel' }, function(out)
     local root = out and vim.trim(out) or nil
     cached_cwd, cached_root = cwd, root
-    open_probe(root)
+    open_root(root)
   end)
 end
 
