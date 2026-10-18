@@ -418,6 +418,67 @@ elseif scenario == 'panel-smoke' then
   assert_(vim.fn.maparg('j', 'n', false, panel_b) ~= '', 'panel j map missing')
   ok()
 
+elseif scenario == 'panel-digits' then
+  -- <C-1>..<C-3> jump to the columns: nvim-tree, the file (editor) column,
+  -- and the claude session column — not the changed-files list.
+  dirty_repo()
+  open_tree(false)
+  sessions(2)
+  local diff = require('claude_sessions.diff')
+  assert_(vim.wait(3000, function() return diff.active() end, 20),
+    'the diff panel did not open')
+  vim.wait(200) -- let the tree-open's scheduled hand-back settle
+  local tree = U.tree_window()
+  local editor = U.editor_window()
+  local term = U.session_window()
+  assert_(tree and editor and term, 'the layout is incomplete')
+  assert_(editor ~= diff.win, 'the file column resolved to the diff list')
+  local function press(key, want)
+    vim.cmd('stopinsert') -- a queued startinsert may have landed in the terminal
+    vim.fn.feedkeys(vim.api.nvim_replace_termcodes(key, true, false, true), 'x')
+    vim.wait(1000, function() return vim.api.nvim_get_current_win() == want end, 10)
+    return vim.api.nvim_get_current_win()
+  end
+  assert_eq(press('<C-1>', tree), tree, '<C-1> did not land on the tree')
+  assert_eq(press('<C-2>', editor), editor, '<C-2> did not land on the file column')
+  assert_eq(press('<C-3>', term), term, '<C-3> did not land on the session column')
+
+  -- Zoom: a jump to another window leaves the float (the switch left the
+  -- session window-less, so unzoom rebuilds it behind the float).
+  M.toggle_zoom()
+  assert_(float_win() ~= nil, 'zoom did not open a float')
+  M.next_session()
+  assert_(U.session_window() == nil, 'the zoomed switch left a session split')
+  assert_eq(press('<C-1>', tree), tree, 'a jump did not leave the zoom float')
+  assert_(float_win() == nil, 'the digit jump left the zoom float up')
+  assert_(U.session_window() ~= nil, 'unzoom did not rebuild a session window')
+  ok()
+
+elseif scenario == 'panel-order' then
+  -- The sidebar stack stays tree / diff list / session list top-down even
+  -- when the session panel reopens while the diff panel is already up.
+  dirty_repo()
+  open_tree(false)
+  sessions(2)
+  local diff = require('claude_sessions.diff')
+  local panel = require('claude_sessions.panel')
+  assert_(vim.wait(3000, function()
+    return diff.active() and U.window_with_filetype('claude-sessions-panel')
+  end, 20), 'panels did not attach below the tree')
+  local tree = U.tree_window()
+  panel.close() -- q on the session panel; the diff list stays up
+  assert_(not U.window_with_filetype('claude-sessions-panel'), 'the session panel did not close')
+  M.next_session() -- reopen through show_session's panel.open()
+  assert_(vim.wait(1000, function()
+    return U.window_with_filetype('claude-sessions-panel') ~= nil
+  end, 20), 'the session panel did not reopen')
+  local diff_w = U.window_with_filetype('claude-sessions-diff')
+  local panel_w = U.window_with_filetype('claude-sessions-panel')
+  local function row(w) return vim.api.nvim_win_get_position(w)[1] end
+  assert_(row(tree) < row(diff_w) and row(diff_w) < row(panel_w),
+    ('stack order is not tree/diff/session (%d/%d/%d)'):format(row(tree), row(diff_w), row(panel_w)))
+  ok()
+
 elseif scenario == 'tree-toggle' then
   -- Closing the tree takes both sidebar panels down with it; reopening the
   -- tree (filetype set BEFORE the window exists, as nvim-tree does) brings

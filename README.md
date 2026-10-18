@@ -35,6 +35,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 | `<C-e>` | `n`, `t`     | Select the next changed file in the diff panel (first press starts the sweep at the first file, later presses advance from the selection and wrap past the last); with a single changed file it toggles the diff pane instead |
 | `<C-b>` | `n`, `t`     | Toggle a shell split below the displayed session (same width; shell 1/3 of the session's height, session 2/3) |
 | `<C-space>` | `n`, `t` | Zoom the displayed session fullscreen (cursor on the `<C-b>` shell zooms the shell instead); press again to come back |
+| `<C-1>`–`<C-3>` | `n`, `t` | While a session is displayed, focus the nvim-tree column (`<C-1>`), the file/editor column (`<C-2>`), or the claude session terminal (`<C-3>`) |
 | `<C-d>` | `t`           | Close the current session (kills the process, removes it from the list) |
 | `<C-d>` | `n` (diff panel) | Discard all uncommitted changes of the file under the cursor after a `y/N` prompt (a tracked file resets to HEAD, an untracked one is deleted) |
 

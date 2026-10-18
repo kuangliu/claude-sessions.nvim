@@ -410,8 +410,20 @@ function M.open()
 
   local buf = U.scratch_buffer('claude-sessions-panel')
   local height = math.floor(vim.o.lines * 0.3)
-  local win = U.split_below(tw, height, buf, U.plain_text_window)
+  -- The stack order is fixed: tree, diff list, session list, top-down. When
+  -- the diff panel is already up, split BELOW it — splitting below the tree
+  -- would insert this list between the two and flip the layout (2 and 3
+  -- would swap).
+  local diff_w = U.window_with_filetype('claude-sessions-diff')
+  local win = U.split_below(diff_w or tw, height, buf, U.plain_text_window)
   vim.api.nvim_win_set_cursor(win, { 1, 0 })
+  -- Calibrate the stack in its real order (the diff panel's own open
+  -- calibrates when it is the one splitting; nothing else would here).
+  if diff_w then
+    U.calibrate_sidebar(tw, diff_w, win)
+  else
+    U.calibrate_sidebar(tw, win)
+  end
 
   M.buf, M.win = buf, win
   render(buf, snap)

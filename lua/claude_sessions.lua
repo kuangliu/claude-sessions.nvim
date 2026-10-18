@@ -20,6 +20,8 @@
 --   <C-b>  toggle a shell terminal below the displayed session
 --   <C-space>  zoom the displayed session (or the shell under the cursor)
 --     fullscreen; again to come back
+--   <C-1>..<C-3>  focus the nvim-tree column, the file (editor) column, or
+--     the claude session terminal
 --   <C-d>  close the current session (terminal mode only)
 
 local M = {}
@@ -816,6 +818,45 @@ local function on_session_exit(record)
   panel_sync() -- the exited session may have been the displayed one
 end
 
+-- --- Panel jumps -------------------------------------------------------------
+-- <C-1>..<C-3> move between the layout's three columns: nvim-tree, the file
+-- (editor) column, and the claude session column. The maps work in normal
+-- and terminal modes — the chords are no use to the terminal programs — and
+-- unlike bare digits they never collide with count prefixes or a global
+-- digit mapping.
+
+local JUMP_TARGETS = { 'tree', 'file panel', 'session' }
+
+--- The window <C-n> addresses, or nil when it is not up.
+local function digit_window(n)
+  if n == 1 then return U.tree_window() end
+  if n == 2 then
+    -- The file (editor) column; a diff pane that took the column over is
+    -- its current occupant (the pane's nofile buffer is no editor_window).
+    return U.editor_window() or (diff_view.active() and diff_view.win or nil)
+  end
+  -- The session column: the zoom float while zoomed (the float IS the
+  -- display then, and the split is gone).
+  return zoomed() and zoom_win or U.session_window()
+end
+
+--- Focus <C-n>'s window. A no-op outside the sessions layout.
+local function jump_to(n)
+  if not M.is_visible() then return end
+  local target = digit_window(n)
+  if not U.valid_win(target) then
+    notify(('No %s window.'):format(JUMP_TARGETS[n]), vim.log.levels.WARN)
+    return
+  end
+  -- The float covers the layout: jumping elsewhere means leaving it. The
+  -- rebuild inside unzoom must not queue toggleterm's startinsert — it
+  -- would fire on the target window.
+  if zoomed() and target ~= zoom_win then
+    with_no_bufenter(unzoom)
+  end
+  focus(target)
+end
+
 -- --- Public API -------------------------------------------------------------
 
 --- Create a NEW session and open it on the right.
@@ -1117,6 +1158,12 @@ function M.setup(user_opts)
     { noremap = true, silent = true, desc = 'Toggle shell below the session' })
   vim.keymap.set({ 'n', 't' }, '<C-space>', function() M.toggle_zoom() end,
     { noremap = true, silent = true, desc = 'Zoom session/shell fullscreen' })
+  -- <C-1>..<C-3> jump to the tree, the diff panel and the session.
+  for n = 1, 3 do
+    vim.keymap.set({ 'n', 't' }, '<C-' .. n .. '>', function() jump_to(n) end,
+      { noremap = true, silent = true,
+        desc = 'claude sessions: focus ' .. JUMP_TARGETS[n] })
+  end
 
   -- Remember manually closed session windows (e.g. :close, <C-w>c) for <C-s>
   -- — and drop the panel when the last displayed window goes. WinClosed fires
